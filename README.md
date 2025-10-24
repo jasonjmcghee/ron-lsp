@@ -2,9 +2,12 @@
 
 An LSP for [RON](https://github.com/ron-rs/ron) files that provides autocomplete and diagnostics support based on Rust type annotations.
 
+<img width="769" height="216" alt="Screenshot 2025-10-23 at 11 04 12 PM" src="https://github.com/user-attachments/assets/5608f39b-0960-4ed4-b484-d0de667b2eb6" />
+
 It can also be used to check in bulk via CLI, optionally with a path. `ron-lsp check [<path>]`
 
-<img width="769" height="216" alt="Screenshot 2025-10-23 at 11 04 12 PM" src="https://github.com/user-attachments/assets/5608f39b-0960-4ed4-b484-d0de667b2eb6" />
+<img width="521" height="487" alt="Screenshot 2025-10-24 at 9 53 03 AM" src="https://github.com/user-attachments/assets/9d5f2f44-a962-4c43-bf8c-32d10e4c02f3" />
+
 
 ## Getting started
 
