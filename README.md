@@ -6,7 +6,7 @@ An LSP for [RON](https://github.com/ron-rs/ron) files that provides autocomplete
 
 It can also be used to check in bulk via CLI, optionally with a path. `ron-lsp check [<path>]`
 
-<img width="521" height="487" alt="Screenshot 2025-10-24 at 9 53 03 AM" src="https://github.com/user-attachments/assets/9d5f2f44-a962-4c43-bf8c-32d10e4c02f3" />
+<img width="503" height="488" alt="Screenshot 2025-10-24 at 10 02 35 AM" src="https://github.com/user-attachments/assets/7914fef5-8fff-4216-bc75-e7437ee5c333" />
 
 
 ## Getting started
@@ -82,13 +82,13 @@ It will use the nearest Cargo.toml starting from the resolved `.ron` file.
 ./target/release/ron-lsp check
 Checking RON files in: "/Users/jason/workspace/ron-lsp"
 Found 17 types in workspace
-Error: Unknown field 'foo'
-    ╭─[./example/data/post.ron:11:5]
-    │
- 11 │     foo: 1,
-    │     ─┬─
-    │      ╰─── Unknown field 'foo'
-────╯
+Warning: Missing fields: published
+   ╭─[./example/data/post.ron:3:1]
+   │
+ 3 │ Post(
+   │ ──┬─
+   │   ╰─── Missing fields: published
+───╯
 Error: Type mismatch: expected User, got integer
    ╭─[./example/data/post.ron:7:13]
    │
@@ -103,13 +103,13 @@ Error: Type mismatch: expected u32, got float
    │            ──┬─
    │              ╰─── Type mismatch: expected u32, got float
 ───╯
-Warning: Missing fields: published
-   ╭─[./example/data/post.ron:3:1]
-   │
- 3 │ Post(
-   │ ──┬─
-   │   ╰─── Missing fields: published
-───╯
+Error: Unknown field 'foo'
+    ╭─[./example/data/post.ron:11:5]
+    │
+ 11 │     foo: 1,
+    │     ─┬─
+    │      ╰─── Unknown field 'foo'
+────╯
 ```
 
 ## Editor Integration
