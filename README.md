@@ -69,7 +69,9 @@ User(
 
 ## CLI
 
-You can optionally pass a file or folder.
+Use via `ron-lsp check`
+
+You can optionally pass a file or folder. (e.g. `ron-lsp check crates/sub-crate` - it will recursively check all `.ron` files from that point.)
 
 It will use the nearest Cargo.toml starting from the resolved `.ron` file.
 
