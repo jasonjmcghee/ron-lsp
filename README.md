@@ -8,6 +8,11 @@ It can also be used to check in bulk via CLI, optionally with a path. `ron-lsp c
 
 <img width="503" height="488" alt="Screenshot 2025-10-24 at 10 02 35 AM" src="https://github.com/user-attachments/assets/7914fef5-8fff-4216-bc75-e7437ee5c333" />
 
+## Note
+
+There's a lot of functionality that could be added to improve this, like code actions (add missing fields), Default support, better auto complete, less hacky type detection and resolution... the list goes on.
+
+Feel free to open a PR or an issue.
 
 ## Getting started
 
