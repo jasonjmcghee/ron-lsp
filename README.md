@@ -1,4 +1,4 @@
-# RON LSP - Type-Aware Language Server for RON Files
+# RON LSP - Type validation for `.ron` files (in or out of the ide)
 
 An LSP for [RON](https://github.com/ron-rs/ron) files that provides autocomplete and diagnostics support based on Rust type annotations.
 
