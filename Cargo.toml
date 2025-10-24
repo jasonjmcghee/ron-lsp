@@ -1,0 +1,26 @@
+[package]
+name = "ron-lsp"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "ron-lsp"
+path = "src/main.rs"
+
+[dependencies]
+tower-lsp = "0.20"
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+ron = "0.11"
+regex = "1.10"
+lazy_static = "1.4"
+
+# For Rust type analysis
+syn = { version = "2.0", features = ["full", "parsing", "extra-traits"] }
+quote = "1.0"
+proc-macro2 = { version = "1.0", features = ["span-locations"] }
+
+# For workspace/file discovery
+walkdir = "2.4"
+ignore = "0.4"

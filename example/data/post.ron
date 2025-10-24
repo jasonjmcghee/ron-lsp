@@ -1,0 +1,12 @@
+/* @[crate::models::Post] */
+
+Post(
+    id: 101,
+    title: "Getting Started with Rust",
+    content: "# Introduction to Rust\n\nRust is a systems programming language...",
+    author: 1,
+    likes: 42.0,
+    tags: ["rust", "programming", "tutorial"],
+    post_type: Short,
+    foo: 1,
+)

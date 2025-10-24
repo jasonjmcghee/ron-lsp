@@ -1,0 +1,61 @@
+{
+  "name": "ron-lsp",
+  "displayName": "RON Language Server",
+  "description": "Language Server for RON with Rust type support",
+  "version": "0.1.0",
+  "publisher": "JasonMcGhee",
+  "repository": "https://github.com/jasonjmcghee/ron-lsp.git",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": ["Programming Languages"],
+  "activationEvents": ["onLanguage:ron"],
+  "main": "./out/extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "ron",
+        "extensions": [".ron"],
+        "aliases": ["RON", "ron"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "configuration": {
+      "type": "object",
+      "title": "RON LSP Configuration",
+      "properties": {
+        "ronLsp.serverPath": {
+          "type": "string",
+          "default": "ron-lsp",
+          "description": "Path to the RON LSP server executable"
+        },
+        "ronLsp.trace.server": {
+          "type": "string",
+          "enum": ["off", "messages", "verbose"],
+          "default": "off",
+          "description": "Traces the communication between VS Code and the language server"
+        }
+      }
+    },
+    "grammars": [
+          {
+              "language": "ron",
+              "scopeName": "source.ron",
+              "path": "./ron.tmGrammar.json"
+          }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^8.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^18.0.0",
+    "@types/vscode": "^1.75.0",
+    "typescript": "^5.0.0"
+  }
+}

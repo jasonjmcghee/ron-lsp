@@ -1,0 +1,236 @@
+{
+  "scopeName": "source.ron",
+  "patterns": [
+    { "include": "#expression" }
+  ],
+  "repository": {
+    "expression": {
+      "patterns": [
+        { "include": "#extension" },
+        { "include": "#array" },
+        { "include": "#block_comment" },
+        { "include": "#constant" },
+        { "include": "#dictionary" },
+        { "include": "#line_comment" },
+        { "include": "#number" },
+        { "include": "#struct-name" },
+        { "include": "#tuple" },
+        { "include": "#object" },
+        { "include": "#raw-string" },
+        { "include": "#string" },
+        { "include": "#character" },
+        { "include": "#field-name" }
+      ]
+    },
+    "array": {
+      "begin": "\\[",
+      "end": "\\]",
+      "beginCaptures": {
+        "0": { "name": "punctuation.section.array.begin.ron" }
+      },
+      "endCaptures": {
+        "0": { "name": "punctuation.section.array.end.ron" }
+      },
+      "patterns": [
+        { "include": "#value" },
+        { "include": "#struct-name" }
+      ]
+    },
+    "block_comment": {
+      "name": "comment.block.ron",
+      "begin": "/\\*",
+      "end": "\\*/"
+    },
+    "constant": {
+      "match": "\\b(true|false|None|Some)\\b",
+      "name": "constant.language.ron"
+    },
+    "dictionary": {
+      "begin": "\\{",
+      "end": "\\}",
+      "beginCaptures": {
+        "0": { "name": "punctuation.section.dictionary.begin.ron" }
+      },
+      "endCaptures": {
+        "0": { "name": "punctuation.section.dictionary.end.ron" }
+      },
+      "patterns": [
+        { "include": "#value" },
+        { "include": "#struct-name" },
+        { "include": "#object" },
+        { "include": "#field-name" },
+        { "match": ",", "name": "punctuation.separator.dictionary.ron" },
+        { "match": ":", "name": "punctuation.separator.dictionary.key-value.ron" }
+      ]
+    },
+    "line_comment": {
+      "name": "comment.line.double-slash.ron",
+      "begin": "//",
+      "end": "$"
+    },
+    "extension": {
+      "name": "meta.preprocessor.ron",
+      "begin": "#!\\[",
+      "end": "\\]",
+      "beginCaptures": {
+        "0": { "name": "punctuation.definition.preprocessor.ron" }
+      },
+      "endCaptures": {
+        "0": { "name": "punctuation.definition.preprocessor.ron" }
+      },
+      "patterns": [
+        { "match": "\\b(enable|disable)\\b", "name": "keyword.control.ron" },
+        { "include": "#value" }
+      ]
+    },
+    "field-name": {
+      "match": "\\b[a-z_][a-z0-9_]*\\b(?=\\s*:)",
+      "name": "variable.other.property.ron"
+    },
+    "struct-name": {
+      "match": "\\b[A-Z][A-Za-z0-9_]*\\b",
+      "name": "entity.name.type.ron"
+    },
+    "tuple": {
+      "begin": "\\(",
+      "end":  "\\)",
+      "beginCaptures": {
+        "0": { "name": "punctuation.section.tuple.begin.ron" }
+      },
+      "endCaptures": {
+        "0": { "name": "punctuation.section.tuple.end.ron" }
+      },
+      "patterns": [
+        { "include": "#value" },
+        { "match": ",", "name": "punctuation.separator.tuple.ron" }
+      ]
+    },
+    "object": {
+      "begin": "(?<=\\w)\\s*\\(",
+      "end":  "\\)",
+      "beginCaptures": {
+        "0": { "name": "punctuation.section.object.begin.ron" }
+      },
+      "endCaptures": {
+        "0": { "name": "punctuation.section.object.end.ron" }
+      },
+      "patterns": [
+        { "include": "#value" },
+        { "include": "#dictionary" },
+        { "include": "#field-name" },
+        { "include": "#struct-name" },
+        { "include": "#tuple" },
+        { "include": "#object" }
+      ]
+    },
+    "number": {
+      "patterns": [
+        {
+          "match": "\\b0x[0-9a-fA-F_]+\\b",
+          "name": "constant.numeric.hex.ron"
+        },
+        {
+          "match": "\\b0o[0-7_]+\\b",
+          "name": "constant.numeric.octal.ron"
+        },
+        {
+          "match": "\\b0b[01_]+\\b",
+          "name": "constant.numeric.binary.ron"
+        },
+        {
+          "match": "\\b([0-9][0-9_]*\\.[0-9_]+([eE][+-]?[0-9_]+)?|[0-9][0-9_]*[eE][+-]?[0-9_]+)\\b",
+          "name": "constant.numeric.float.ron"
+        },
+        {
+          "match": "\\b[0-9][0-9_]*\\b",
+          "name": "constant.numeric.integer.ron"
+        }
+      ]
+    },
+    "raw-string": {
+      "patterns": [
+        {
+          "name": "string.quoted.double.raw.ron",
+          "begin": "(b?r)(#*)(\")",
+          "end": "(\")(\\2)",
+          "beginCaptures": {
+            "1": { "name": "string.quoted.double.raw.prefix.ron" },
+            "2": { "name": "string.quoted.double.raw.delimiter.ron" },
+            "3": { "name": "punctuation.definition.string.begin.ron" }
+          },
+          "endCaptures": {
+            "1": { "name": "punctuation.definition.string.end.ron" },
+            "2": { "name": "string.quoted.double.raw.delimiter.ron" }
+          }
+        }
+      ]
+    },
+    "string": {
+      "begin": "(b?)(\")",
+      "end": "\"",
+      "name": "string.quoted.double.ron",
+      "beginCaptures": {
+        "1": { "name": "string.quoted.double.prefix.ron" },
+        "2": { "name": "punctuation.definition.string.begin.ron" }
+      },
+      "endCaptures": {
+        "0": { "name": "punctuation.definition.string.end.ron" }
+      },
+      "patterns": [{ "include": "#escapes" }]
+    },
+    "character": {
+      "begin": "'",
+      "end": "'",
+      "name": "string.quoted.single.ron",
+      "beginCaptures": {
+        "0": { "name": "punctuation.definition.char.begin.ron" }
+      },
+      "endCaptures": {
+        "0": { "name": "punctuation.definition.char.end.ron" }
+      },
+      "patterns": [
+        { "include": "#escapes" },
+        {
+          "match": ".",
+          "name": "constant.character.ron"
+        }
+      ]
+    },
+    "value": {
+      "patterns": [
+        { "include": "#array" },
+        { "include": "#block_comment" },
+        { "include": "#constant" },
+        { "include": "#dictionary" },
+        { "include": "#line_comment" },
+        { "include": "#number" },
+        { "include": "#struct-name" },
+        { "include": "#object" },
+        { "include": "#tuple" },
+        { "include": "#raw-string" },
+        { "include": "#string" },
+        { "include": "#character" }
+      ]
+    },
+    "escapes": {
+      "patterns": [
+        {
+          "match": "\\\\(x[0-9a-fA-F]{2})",
+          "name": "constant.character.escape.hex.ron"
+        },
+        {
+          "match": "\\\\(u\\{[0-9a-fA-F]{1,6}\\})",
+          "name": "constant.character.escape.unicode.ron"
+        },
+        {
+          "match": "\\\\[nrt\\\\\"'0]",
+          "name": "constant.character.escape.ron"
+        },
+        {
+          "match": "\\\\.",
+          "name": "invalid.illegal.escape.ron"
+        }
+      ]
+    }
+  }
+}
