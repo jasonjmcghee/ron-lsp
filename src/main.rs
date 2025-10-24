@@ -622,13 +622,16 @@ async fn run_check(path: PathBuf) {
         if let Some(type_path) = type_annotation {
             if let Some(type_info) = analyzer.get_type_info(&type_path).await {
                 // Validate the file
-                let diagnostics =
+                let mut diagnostics =
                     diagnostics::validate_ron_portable(&content, &type_info, analyzer.clone())
                         .await;
 
                 if !diagnostics.is_empty() {
                     files_with_errors += 1;
                     total_errors += diagnostics.len();
+
+                    // Sort diagnostics by line and column (first to last)
+                    diagnostics.sort();
 
                     // Report diagnostics using ariadne
                     for diagnostic in diagnostics {

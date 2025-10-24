@@ -14,6 +14,30 @@ pub struct Diagnostic {
     pub message: String,
 }
 
+impl PartialEq for Diagnostic {
+    fn eq(&self, other: &Self) -> bool {
+        self.line == other.line && self.col_start == other.col_start
+    }
+}
+
+impl Eq for Diagnostic {}
+
+impl PartialOrd for Diagnostic {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Diagnostic {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        // Sort by line first, then by column
+        match self.line.cmp(&other.line) {
+            std::cmp::Ordering::Equal => self.col_start.cmp(&other.col_start),
+            other => other,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Severity {
     Error,
