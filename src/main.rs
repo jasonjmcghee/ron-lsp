@@ -1,5 +1,6 @@
 mod annotation_parser;
 mod completion;
+mod diagnostic_reporter;
 mod diagnostics;
 mod ron_parser;
 mod rust_analyzer;
@@ -282,10 +283,16 @@ impl LanguageServer for Backend {
             if let Some(field_name) = ron_parser::get_field_at_position(&doc.content, position) {
                 if let Some(field) = info.find_field(&field_name) {
                     // Get the type of this specific field
-                    if let Some(field_type_info) = self.rust_analyzer.get_type_info(&field.type_name).await {
+                    if let Some(field_type_info) =
+                        self.rust_analyzer.get_type_info(&field.type_name).await
+                    {
                         // Check if word is a variant of this field's type
                         if let Some(variant) = field_type_info.find_variant(&word) {
-                            return create_location_response(&field_type_info.source_file, variant.line, variant.column);
+                            return create_location_response(
+                                &field_type_info.source_file,
+                                variant.line,
+                                variant.column,
+                            );
                         }
                     }
                 }
@@ -412,7 +419,12 @@ fn get_word_at_position(content: &str, position: Position) -> Option<String> {
     if start < end {
         let word = line[start..end].to_string();
         // Only return if it's a valid identifier (starts with letter or underscore, not a number)
-        if word.chars().next().map(|c| c.is_alphabetic() || c == '_').unwrap_or(false) {
+        if word
+            .chars()
+            .next()
+            .map(|c| c.is_alphabetic() || c == '_')
+            .unwrap_or(false)
+        {
             return Some(word);
         }
     }
@@ -486,11 +498,164 @@ impl Backend {
     }
 }
 
+#[cfg(feature = "cli")]
+use clap::{Parser, Subcommand};
+
+#[cfg(feature = "cli")]
+#[derive(Parser)]
+#[command(name = "ron-lsp")]
+#[command(about = "LSP server and validator for RON files", long_about = None)]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Commands>,
+}
+
+#[cfg(feature = "cli")]
+#[derive(Subcommand)]
+enum Commands {
+    /// Check RON files in a directory for errors
+    Check {
+        /// Directory to check (defaults to current directory)
+        #[arg(default_value = ".")]
+        directory: PathBuf,
+    },
+}
+
 #[tokio::main]
 async fn main() {
+    #[cfg(feature = "cli")]
+    {
+        let cli = Cli::parse();
+
+        match cli.command {
+            Some(Commands::Check { directory }) => {
+                run_check(directory).await;
+                return;
+            }
+            None => {
+                // Fall through to LSP server
+            }
+        }
+    }
+
+    // Run as LSP server
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
 
     let (service, socket) = LspService::new(Backend::new);
     Server::new(stdin, stdout, socket).serve(service).await;
+}
+
+#[cfg(feature = "cli")]
+async fn run_check(path: PathBuf) {
+    use std::fs;
+    use walkdir::WalkDir;
+
+    // Check if path is a file or directory
+    let is_file = path.is_file();
+
+    // Find workspace root by looking for Cargo.toml
+    let workspace_root = {
+        let start_dir = if is_file {
+            path.parent().unwrap_or_else(|| std::path::Path::new("."))
+        } else {
+            &path
+        };
+
+        let mut current = start_dir;
+        loop {
+            if current.join("Cargo.toml").exists() {
+                break current;
+            }
+            match current.parent() {
+                Some(parent) => current = parent,
+                None => break std::path::Path::new("."),
+            }
+        }
+    };
+
+    eprintln!(
+        "Checking RON files in: {:?}",
+        path.canonicalize().unwrap_or(path.clone())
+    );
+
+    // Initialize the Rust analyzer with workspace root
+    let analyzer = Arc::new(rust_analyzer::RustAnalyzer::new());
+    analyzer.set_workspace_root(workspace_root).await;
+
+    let types = analyzer.get_all_types().await;
+    eprintln!("Found {} types in workspace", types.len());
+
+    let mut total_files = 0;
+    let mut files_with_errors = 0;
+    let mut total_errors = 0;
+
+    // Collect files to check
+    let files_to_check: Vec<PathBuf> = if is_file {
+        vec![path.clone()]
+    } else {
+        WalkDir::new(&path)
+            .follow_links(true)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .map(|e| e.path().to_path_buf())
+            .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("ron"))
+            .collect()
+    };
+
+    // Process each file
+    for file_path in files_to_check {
+        total_files += 1;
+
+        // Read the file
+        let content = match fs::read_to_string(&file_path) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("Error reading {}: {}", file_path.display(), e);
+                continue;
+            }
+        };
+
+        // Parse type annotation
+        let type_annotation = annotation_parser::parse_type_annotation(&content);
+
+        if let Some(type_path) = type_annotation {
+            if let Some(type_info) = analyzer.get_type_info(&type_path).await {
+                // Validate the file
+                let diagnostics =
+                    diagnostics::validate_ron_portable(&content, &type_info, analyzer.clone())
+                        .await;
+
+                if !diagnostics.is_empty() {
+                    files_with_errors += 1;
+                    total_errors += diagnostics.len();
+
+                    // Report diagnostics using ariadne
+                    for diagnostic in diagnostics {
+                        diagnostic.report_ariadne(&file_path, &content);
+                    }
+                }
+            } else {
+                files_with_errors += 1;
+                total_errors += 1;
+                eprintln!(
+                    "\n{}: Could not find type: {}\n",
+                    file_path.display(),
+                    type_path
+                );
+            }
+        }
+        // Files without type annotations are skipped silently
+    }
+
+    eprintln!("\nChecked {} RON files", total_files);
+    if total_errors > 0 {
+        eprintln!(
+            "{} files with errors ({} total errors)",
+            files_with_errors, total_errors
+        );
+        std::process::exit(1);
+    } else {
+        eprintln!("All files valid!");
+    }
 }

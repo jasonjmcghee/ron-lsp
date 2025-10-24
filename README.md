@@ -2,7 +2,11 @@
 
 An LSP for [RON](https://github.com/ron-rs/ron) files that provides autocomplete and diagnostics support based on Rust type annotations.
 
+<<<<<<< Updated upstream
 <img width="769" height="216" alt="Screenshot 2025-10-23 at 11 04 12 PM" src="https://github.com/user-attachments/assets/5608f39b-0960-4ed4-b484-d0de667b2eb6" />
+=======
+It can also be used to check in bulk via CLI, optionally with a path. `ron-lsp check [<path>]`
+>>>>>>> Stashed changes
 
 ## Getting started
 
@@ -63,6 +67,46 @@ User(
     age: 30,
     bio: Some("Software developer"),
 )
+```
+
+## CLI
+
+You can optionally pass a file or folder.
+
+It will use the nearest Cargo.toml starting from the resolved `.ron` file.
+
+```bash
+./target/release/ron-lsp check
+Checking RON files in: "/Users/jason/workspace/ron-lsp"
+Found 17 types in workspace
+Error: Unknown field 'foo'
+    ╭─[./example/data/post.ron:11:5]
+    │
+ 11 │     foo: 1,
+    │     ─┬─
+    │      ╰─── Unknown field 'foo'
+────╯
+Error: Type mismatch: expected User, got integer
+   ╭─[./example/data/post.ron:7:13]
+   │
+ 7 │     author: 1,
+   │             ┬
+   │             ╰── Type mismatch: expected User, got integer
+───╯
+Error: Type mismatch: expected u32, got float
+   ╭─[./example/data/post.ron:8:12]
+   │
+ 8 │     likes: 42.0,
+   │            ──┬─
+   │              ╰─── Type mismatch: expected u32, got float
+───╯
+Warning: Missing fields: published
+   ╭─[./example/data/post.ron:3:1]
+   │
+ 3 │ Post(
+   │ ──┬─
+   │   ╰─── Missing fields: published
+───╯
 ```
 
 ## Editor Integration

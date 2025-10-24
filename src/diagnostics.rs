@@ -1,8 +1,21 @@
+#[cfg(feature = "cli")]
+use crate::diagnostic_reporter;
 use crate::ron_parser;
 use crate::rust_analyzer::{EnumVariant, FieldInfo, RustAnalyzer, TypeInfo, TypeKind};
 use ron::Value;
 use std::sync::Arc;
 use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
+
+/// Validate RON with access to RustAnalyzer for recursive type lookups (returns portable diagnostics)
+#[cfg(feature = "cli")]
+pub async fn validate_ron_portable(
+    content: &str,
+    type_info: &TypeInfo,
+    analyzer: Arc<RustAnalyzer>,
+) -> Vec<diagnostic_reporter::Diagnostic> {
+    let lsp_diagnostics = validate_ron_with_analyzer(content, type_info, analyzer).await;
+    lsp_diagnostics_to_portable(&lsp_diagnostics)
+}
 
 /// Validate RON with access to RustAnalyzer for recursive type lookups
 pub async fn validate_ron_with_analyzer(
@@ -33,6 +46,29 @@ pub async fn validate_ron_with_analyzer(
     }
 
     diagnostics
+}
+
+/// Convert LSP diagnostics to portable format
+#[cfg(feature = "cli")]
+fn lsp_diagnostics_to_portable(diagnostics: &[Diagnostic]) -> Vec<diagnostic_reporter::Diagnostic> {
+    diagnostics
+        .iter()
+        .map(|d| {
+            let severity = match d.severity {
+                Some(DiagnosticSeverity::ERROR) => diagnostic_reporter::Severity::Error,
+                Some(DiagnosticSeverity::WARNING) => diagnostic_reporter::Severity::Warning,
+                _ => diagnostic_reporter::Severity::Info,
+            };
+
+            diagnostic_reporter::Diagnostic {
+                line: d.range.start.line,
+                col_start: d.range.start.character,
+                col_end: d.range.end.character,
+                severity,
+                message: d.message.clone(),
+            }
+        })
+        .collect()
 }
 
 /// Helper function for struct validation (async version with analyzer)
@@ -126,8 +162,12 @@ async fn validate_struct_fields(
 
     if !missing_fields.is_empty() {
         let missing_names: Vec<String> = missing_fields.iter().map(|f| f.name.clone()).collect();
+
+        // Find the struct name position in the content
+        let (line, col_start, col_end) = find_struct_name_position(content);
+
         diagnostics.push(Diagnostic {
-            range: Range::new(Position::new(0, 0), Position::new(0, 1)),
+            range: Range::new(Position::new(line, col_start), Position::new(line, col_end)),
             severity: Some(DiagnosticSeverity::WARNING),
             message: format!("Missing fields: {}", missing_names.join(", ")),
             ..Default::default()
@@ -196,6 +236,22 @@ fn is_primitive_type(type_name: &str) -> bool {
     false
 }
 
+/// Check if a type is a standard library generic type (Option, Vec, HashMap, etc.)
+fn is_std_generic_type(type_name: &str) -> bool {
+    let clean = type_name.replace(" ", "");
+
+    clean.starts_with("Option<")
+        || clean.starts_with("Vec<")
+        || clean.contains("HashMap<")
+        || clean.contains("BTreeMap<")
+        || clean.contains("HashSet<")
+        || clean.contains("BTreeSet<")
+        || clean.starts_with("Result<")
+        || clean.starts_with("Box<")
+        || clean.starts_with("Rc<")
+        || clean.starts_with("Arc<")
+}
+
 /// Extract the variant name from raw RON text
 /// Enums can be: Simple (Long), or with data (Long(...))
 fn extract_enum_variant_from_text(content: &str) -> Option<String> {
@@ -235,6 +291,37 @@ fn find_variant_position(content: &str, variant: &str) -> (u32, u32) {
     }
 
     (0, 0)
+}
+
+/// Find the position of the struct name in the RON content (e.g., "Post" in "Post(...)")
+fn find_struct_name_position(content: &str) -> (u32, u32, u32) {
+    for (line_num, line) in content.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with("//") || trimmed.starts_with("/*") {
+            continue;
+        }
+
+        // Look for a struct name followed by '(' (e.g., "Post(")
+        if let Some(open_paren) = trimmed.find('(') {
+            // Extract the struct name before the paren
+            let before_paren = &trimmed[..open_paren];
+            let struct_name = before_paren.trim();
+
+            if !struct_name.is_empty() && struct_name.chars().next().unwrap().is_uppercase() {
+                // Find the position in the original line (not trimmed)
+                if let Some(col_start) = line.find(struct_name) {
+                    return (
+                        line_num as u32,
+                        col_start as u32,
+                        (col_start + struct_name.len()) as u32,
+                    );
+                }
+            }
+        }
+    }
+
+    // Default to first character if we can't find it
+    (0, 0, 1)
 }
 
 /// Find the position of a field's value in the content for better error reporting
@@ -317,8 +404,8 @@ fn check_type_mismatch_deep(
 ) -> Option<String> {
     let clean_type = expected_type.replace(" ", "");
 
-    // First check if it's a primitive type
-    if is_primitive_type(expected_type) {
+    // First check if it's a primitive type or standard library generic type
+    if is_primitive_type(expected_type) || is_std_generic_type(expected_type) {
         return check_type_mismatch(value, expected_type);
     }
 
@@ -389,6 +476,8 @@ fn extract_field_value_text(content: &str, field_name: &str) -> Option<String> {
 /// Check if a RON value matches the expected Rust type
 fn check_type_mismatch(value: &Value, expected_type: &str) -> Option<String> {
     let clean_type = expected_type.replace(" ", "");
+    // Use clean_type for error messages to avoid extra spaces
+    let display_type = &clean_type;
 
     // Handle Option types - None is always valid for Option<T>
     if clean_type.starts_with("Option<") {
@@ -408,10 +497,28 @@ fn check_type_mismatch(value: &Value, expected_type: &str) -> Option<String> {
         }
     }
 
+    // Handle Box, Rc, Arc - they serialize as just the inner value
+    if clean_type.starts_with("Box<")
+        || clean_type.starts_with("Rc<")
+        || clean_type.starts_with("Arc<")
+    {
+        let wrapper = if clean_type.starts_with("Box<") {
+            "Box<"
+        } else if clean_type.starts_with("Rc<") {
+            "Rc<"
+        } else {
+            "Arc<"
+        };
+
+        if let Some(inner_type) = extract_inner_type(&clean_type, wrapper) {
+            return check_type_mismatch(value, &inner_type);
+        }
+    }
+
     match value {
         Value::Bool(_) => {
             if clean_type != "bool" {
-                return Some(format!("expected {}, got bool", expected_type));
+                return Some(format!("expected {}, got bool", display_type));
             }
         }
         Value::Number(n) => {
@@ -430,19 +537,23 @@ fn check_type_mismatch(value: &Value, expected_type: &str) -> Option<String> {
             let is_int_value = !is_float_value;
 
             if is_float_value && is_integer_type {
-                return Some(format!("expected {}, got float", expected_type));
+                return Some(format!("expected {}, got float", display_type));
             }
             if is_int_value && is_float_type {
-                return Some(format!("expected {}, got integer", expected_type));
+                return Some(format!("expected {}, got integer", display_type));
             }
+            // If not a numeric type at all, it's an error
             if !is_integer_type && !is_float_type {
-                return Some(format!("expected {}, got number", expected_type));
+                return Some(format!("expected {}, got number", display_type));
             }
         }
         Value::String(_) => {
-            if clean_type != "String" && clean_type != "&str" && clean_type != "str" {
-                return Some(format!("expected {}, got string", expected_type));
+            // String is valid for String types
+            if clean_type == "String" || clean_type == "&str" || clean_type == "str" {
+                return None;
             }
+            // Otherwise it's an error
+            return Some(format!("expected {}, got string", display_type));
         }
         Value::Seq(seq) => {
             if clean_type.starts_with("Vec<") {
@@ -454,16 +565,22 @@ fn check_type_mismatch(value: &Value, expected_type: &str) -> Option<String> {
                         }
                     }
                 }
+            } else if clean_type.contains("HashSet<") || clean_type.contains("BTreeSet<") {
+                // Sets are serialized as arrays in RON
+                return None;
+            } else if clean_type.starts_with("Result<") {
+                // Result variants like Ok(...) and Err(...) are serialized as tuples/arrays
+                return None;
             } else if clean_type.starts_with("[") {
                 // Array type
                 return None; // Arrays are similar to Vec, accept them
             } else {
-                return Some(format!("expected {}, got array", expected_type));
+                return Some(format!("expected {}, got array", display_type));
             }
         }
         Value::Map(_) => {
             // Maps could be structs or actual maps
-            if clean_type.starts_with("HashMap<") || clean_type.starts_with("BTreeMap<") {
+            if clean_type.contains("HashMap<") || clean_type.contains("BTreeMap<") {
                 // It's a map type, which is fine
                 return None;
             }
@@ -477,21 +594,21 @@ fn check_type_mismatch(value: &Value, expected_type: &str) -> Option<String> {
                 // Could be a struct, allow it
                 return None;
             }
-            return Some(format!("expected {}, got map/struct", expected_type));
+            return Some(format!("expected {}, got map/struct", display_type));
         }
         Value::Option(Some(_)) => {
             if !clean_type.starts_with("Option<") {
-                return Some(format!("expected {}, got Some(...)", expected_type));
+                return Some(format!("expected {}, got Some(...)", display_type));
             }
         }
         Value::Option(None) => {
             if !clean_type.starts_with("Option<") {
-                return Some(format!("expected {}, got None", expected_type));
+                return Some(format!("expected {}, got None", display_type));
             }
         }
         Value::Unit => {
             if clean_type != "()" && clean_type != "unit" {
-                return Some(format!("expected {}, got ()", expected_type));
+                return Some(format!("expected {}, got ()", display_type));
             }
         }
         _ => {}
@@ -725,8 +842,12 @@ mod tests {
         if !missing_fields.is_empty() {
             let missing_names: Vec<String> =
                 missing_fields.iter().map(|f| f.name.clone()).collect();
+
+            // Find the struct name position in the content
+            let (line, col_start, col_end) = find_struct_name_position(content);
+
             diagnostics.push(Diagnostic {
-                range: Range::new(Position::new(0, 0), Position::new(0, 1)),
+                range: Range::new(Position::new(line, col_start), Position::new(line, col_end)),
                 severity: Some(DiagnosticSeverity::WARNING),
                 message: format!("Missing fields: {}", missing_names.join(", ")),
                 ..Default::default()
@@ -976,6 +1097,28 @@ mod tests {
             "Should have type mismatch error. Got: {:?}",
             diagnostics
         );
+    }
+
+    #[test]
+    fn test_ron_parsing_collections() {
+        // Test what RON actually parses for bad collection values
+        let content = r#"GenericTest(
+            bad_hashmap: "not a map",
+            bad_btreemap: 123,
+            bad_hashset: "not a set",
+        )"#;
+
+        let parsed = ron::from_str::<Value>(content);
+        println!("Parse result: {:?}", parsed);
+
+        if let Ok(Value::Map(map)) = parsed {
+            println!("Map has {} entries", map.len());
+            for (k, v) in map.iter() {
+                if let Value::String(key) = k {
+                    println!("  {}: {:?}", key, v);
+                }
+            }
+        }
     }
 
     #[test]
