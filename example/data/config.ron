@@ -1,0 +1,8 @@
+/* @[crate::models::Config] */
+Config(
+    // This Config struct has #[derive(Default)]
+    // So we can omit fields and they will use their default values
+    // The LSP should NOT show warnings for missing fields
+    port: 8080,
+    debug: true,
+)

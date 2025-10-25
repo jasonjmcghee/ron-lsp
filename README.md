@@ -48,6 +48,8 @@ The LSP will:
 2. Find the `User` struct in your Rust project
 3. Extract field names, types, and documentation
 4. Provide autocomplete and validation
+5. Support `Default` trait for optional field omission
+6. Provide code actions for inserting either required or missing fields, when applicable
 
 ### Example
 
@@ -72,6 +74,27 @@ User(
     email: "alice@example.com",
     age: 30,
     bio: Some("Software developer"),
+)
+```
+
+### Example with Defaults
+
+**Example with Default:**
+
+```rust
+#[derive(Default, Serialize, Deserialize)]
+pub struct Config {
+    pub host: String,
+    pub port: u16,
+    pub debug: bool,
+}
+```
+
+```ron
+/* @[crate::models::Config] */
+Config(
+    port: 8080,
+    // host and debug are omitted - they will use default values -- no warnings
 )
 ```
 

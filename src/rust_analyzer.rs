@@ -37,6 +37,7 @@ pub struct TypeInfo {
     pub source_file: Option<PathBuf>,
     pub line: Option<usize>,
     pub column: Option<usize>,
+    pub has_default: bool,
 }
 
 impl TypeInfo {
@@ -254,6 +255,7 @@ impl RustAnalyzer {
         let start = struct_item.ident.span().start();
         let line = Some(start.line);
         let column = Some(start.column);
+        let has_default = has_default_derive(&struct_item.attrs);
 
         Some(TypeInfo {
             name: full_path,
@@ -262,6 +264,7 @@ impl RustAnalyzer {
             source_file: Some(file_path.to_path_buf()),
             line,
             column,
+            has_default,
         })
     }
 
@@ -347,6 +350,7 @@ impl RustAnalyzer {
         let start = enum_item.ident.span().start();
         let line = Some(start.line);
         let column = Some(start.column);
+        let has_default = has_default_derive(&enum_item.attrs);
 
         Some(TypeInfo {
             name: full_path,
@@ -355,6 +359,7 @@ impl RustAnalyzer {
             source_file: Some(file_path.to_path_buf()),
             line,
             column,
+            has_default,
         })
     }
 
@@ -456,6 +461,23 @@ fn extract_docs(attrs: &[Attribute]) -> Option<String> {
     } else {
         Some(docs.join("\n"))
     }
+}
+
+fn has_default_derive(attrs: &[Attribute]) -> bool {
+    attrs.iter().any(|attr| {
+        if attr.path().is_ident("derive") {
+            // Parse the derive attribute to check for Default
+            if let Ok(meta_list) = attr.meta.require_list() {
+                let tokens_str = meta_list.tokens.to_string();
+                // Check if "Default" appears in the derive list
+                tokens_str.split(',').any(|s| s.trim() == "Default")
+            } else {
+                false
+            }
+        } else {
+            false
+        }
+    })
 }
 
 fn type_to_string(ty: &Type) -> String {
