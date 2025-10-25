@@ -84,15 +84,21 @@ User(
 pub struct Config {
     pub host: String,
     pub port: u16,
+    pub max_connections: u32,
     pub debug: bool,
+    pub api_key: Option<String>,
+    pub allowed_origins: Vec<String>,
 }
 ```
 
 ```ron
 /* @[crate::models::Config] */
 Config(
+    // This Config struct has #[derive(Default)]
+    // So we can omit fields and they will use their default values
+    // The LSP should NOT show warnings for missing fields
     port: 8080,
-    // host and debug are omitted - they will use default values -- no warnings
+    debug: true,
 )
 ```
 
