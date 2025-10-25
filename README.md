@@ -79,8 +79,6 @@ User(
 
 ### Example with Defaults
 
-**Example with Default:**
-
 ```rust
 #[derive(Default, Serialize, Deserialize)]
 pub struct Config {
@@ -97,6 +95,8 @@ Config(
     // host and debug are omitted - they will use default values -- no warnings
 )
 ```
+
+<img width="707" height="436" alt="Screenshot 2025-10-24 at 5 52 13 PM" src="https://github.com/user-attachments/assets/f638947d-0408-4a7d-a209-de8e5d56c15d" />
 
 ## CLI
 
