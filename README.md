@@ -114,37 +114,9 @@ It will use the nearest Cargo.toml starting from the resolved `.ron` file.
 
 ```bash
 ./target/release/ron-lsp check
-Checking RON files in: "/Users/jason/workspace/ron-lsp"
-Found 17 types in workspace
-Warning: Missing fields: published
-   ╭─[./example/data/post.ron:3:1]
-   │
- 3 │ Post(
-   │ ──┬─
-   │   ╰─── Missing fields: published
-───╯
-Error: Type mismatch: expected User, got integer
-   ╭─[./example/data/post.ron:7:13]
-   │
- 7 │     author: 1,
-   │             ┬
-   │             ╰── Type mismatch: expected User, got integer
-───╯
-Error: Type mismatch: expected u32, got float
-   ╭─[./example/data/post.ron:8:12]
-   │
- 8 │     likes: 42.0,
-   │            ──┬─
-   │              ╰─── Type mismatch: expected u32, got float
-───╯
-Error: Unknown field 'foo'
-    ╭─[./example/data/post.ron:11:5]
-    │
- 11 │     foo: 1,
-    │     ─┬─
-    │      ╰─── Unknown field 'foo'
-────╯
 ```
+
+<img width="503" height="488" alt="Screenshot 2025-10-24 at 10 02 35 AM" src="https://github.com/user-attachments/assets/7914fef5-8fff-4216-bc75-e7437ee5c333" />
 
 ## Editor Integration
 
