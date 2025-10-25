@@ -105,6 +105,7 @@ impl LanguageServer for Backend {
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
                 definition_provider: Some(OneOf::Left(true)),
                 rename_provider: Some(OneOf::Left(true)),
+                code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
                 ..Default::default()
             },
             ..Default::default()
@@ -350,6 +351,186 @@ impl LanguageServer for Backend {
         }
 
         Ok(None)
+    }
+
+    async fn code_action(&self, params: CodeActionParams) -> Result<Option<CodeActionResponse>> {
+        let uri = params.text_document.uri.to_string();
+
+        let documents = self.documents.read().await;
+        if let Some(doc) = documents.get(&uri) {
+            if let Some(type_path) = &doc.type_annotation {
+                if let Some(type_info) = self.rust_analyzer.get_type_info(type_path).await {
+                    // Only provide code actions for structs
+                    if let Some(fields) = type_info.fields() {
+                        let ron_fields = ron_parser::extract_fields_from_ron(&doc.content);
+
+                        // Find missing fields
+                        let all_missing: Vec<_> = fields
+                            .iter()
+                            .filter(|field| !ron_fields.contains(&field.name))
+                            .collect();
+
+                        // Find required missing fields (not Option<T> and no Default trait)
+                        let required_missing: Vec<_> = all_missing
+                            .iter()
+                            .filter(|&&field| !field.type_name.starts_with("Option") && !type_info.has_default)
+                            .copied()
+                            .collect();
+
+                        let mut actions = Vec::new();
+
+                        // Code action: Add all required fields
+                        if !required_missing.is_empty() {
+                            let new_text = generate_field_insertions(&required_missing, &doc.content);
+                            if let Some(edit) = new_text {
+                                let mut changes = std::collections::HashMap::new();
+                                changes.insert(
+                                    tower_lsp::lsp_types::Url::parse(&uri).unwrap(),
+                                    vec![edit],
+                                );
+
+                                actions.push(CodeActionOrCommand::CodeAction(CodeAction {
+                                    title: format!("Add {} required field{}",
+                                        required_missing.len(),
+                                        if required_missing.len() == 1 { "" } else { "s" }
+                                    ),
+                                    kind: Some(CodeActionKind::QUICKFIX),
+                                    edit: Some(WorkspaceEdit {
+                                        changes: Some(changes),
+                                        ..Default::default()
+                                    }),
+                                    ..Default::default()
+                                }));
+                            }
+                        }
+
+                        // Code action: Add all fields
+                        if !all_missing.is_empty() {
+                            let new_text = generate_field_insertions(&all_missing, &doc.content);
+                            if let Some(edit) = new_text {
+                                let mut changes = std::collections::HashMap::new();
+                                changes.insert(
+                                    tower_lsp::lsp_types::Url::parse(&uri).unwrap(),
+                                    vec![edit],
+                                );
+
+                                actions.push(CodeActionOrCommand::CodeAction(CodeAction {
+                                    title: format!("Add all {} missing field{}",
+                                        all_missing.len(),
+                                        if all_missing.len() == 1 { "" } else { "s" }
+                                    ),
+                                    kind: Some(CodeActionKind::QUICKFIX),
+                                    edit: Some(WorkspaceEdit {
+                                        changes: Some(changes),
+                                        ..Default::default()
+                                    }),
+                                    ..Default::default()
+                                }));
+                            }
+                        }
+
+                        if !actions.is_empty() {
+                            return Ok(Some(actions));
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(None)
+    }
+}
+
+fn generate_field_insertions(missing_fields: &[&rust_analyzer::FieldInfo], content: &str) -> Option<TextEdit> {
+    // Find the insertion point - right before the closing parenthesis
+    let lines: Vec<&str> = content.lines().collect();
+
+    // Find the last line with content (before the closing paren)
+    let mut insert_line = 0;
+    let mut insert_col = 0;
+    let mut found_opening = false;
+
+    for (line_num, line) in lines.iter().enumerate() {
+        if line.contains('(') {
+            found_opening = true;
+        }
+        if found_opening && line.contains(')') {
+            insert_line = line_num;
+            // Find the position of the closing paren
+            insert_col = line.find(')').unwrap_or(0);
+            break;
+        }
+    }
+
+    if !found_opening {
+        return None;
+    }
+
+    // Check if we need to add a comma before our new fields
+    let needs_comma = if insert_line > 0 {
+        let prev_line = lines[insert_line.saturating_sub(1)].trim();
+        !prev_line.is_empty() && !prev_line.ends_with(',') && !prev_line.ends_with('(')
+    } else {
+        false
+    };
+
+    // Generate the field text
+    let mut field_text = String::new();
+    if needs_comma {
+        field_text.push_str(",\n");
+    } else if insert_line > 0 {
+        field_text.push('\n');
+    }
+
+    // Detect indentation from existing content
+    let indent = if let Some(line_with_field) = lines.iter()
+        .find(|l| l.contains(':') && !l.trim().starts_with("/*"))
+    {
+        let trimmed = line_with_field.trim_start();
+        &line_with_field[..line_with_field.len() - trimmed.len()]
+    } else {
+        "    " // default to 4 spaces
+    };
+
+    for (i, field) in missing_fields.iter().enumerate() {
+        field_text.push_str(indent);
+        field_text.push_str(&field.name);
+        field_text.push_str(": ");
+        field_text.push_str(&generate_default_value(&field.type_name));
+        if i < missing_fields.len() - 1 {
+            field_text.push(',');
+        }
+        field_text.push('\n');
+    }
+
+    Some(TextEdit {
+        range: Range::new(
+            Position::new(insert_line as u32, insert_col as u32),
+            Position::new(insert_line as u32, insert_col as u32),
+        ),
+        new_text: field_text,
+    })
+}
+
+fn generate_default_value(type_name: &str) -> String {
+    let clean = type_name.replace(" ", "");
+
+    if clean.starts_with("Option") {
+        "None".to_string()
+    } else if clean == "bool" {
+        "false".to_string()
+    } else if clean.starts_with("Vec") || clean.starts_with("[") {
+        "[]".to_string()
+    } else if clean.starts_with("HashMap") || clean.starts_with("BTreeMap") {
+        "{}".to_string()
+    } else if clean == "String" || clean == "&str" || clean == "str" {
+        "\"\"".to_string()
+    } else if clean.chars().all(|c| c.is_numeric() || c == 'i' || c == 'u' || c == 'f') {
+        // Numeric types
+        "0".to_string()
+    } else {
+        // Custom type - use constructor notation with placeholder
+        format!("{}()", clean)
     }
 }
 

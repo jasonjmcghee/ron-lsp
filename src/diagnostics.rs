@@ -37,7 +37,14 @@ pub async fn validate_ron_with_analyzer(
     match &type_info.kind {
         TypeKind::Struct(fields) => {
             diagnostics.extend(
-                validate_struct_fields(content, fields, &parsed_value, Some(&analyzer)).await,
+                validate_struct_fields(
+                    content,
+                    fields,
+                    &parsed_value,
+                    type_info.has_default,
+                    Some(&analyzer),
+                )
+                .await,
             );
         }
         TypeKind::Enum(variants) => {
@@ -76,6 +83,7 @@ async fn validate_struct_fields(
     content: &str,
     fields: &[FieldInfo],
     parsed_value: &Result<Value, ron::error::SpannedError>,
+    has_default: bool,
     analyzer: Option<&Arc<RustAnalyzer>>,
 ) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
@@ -155,23 +163,29 @@ async fn validate_struct_fields(
     }
 
     // Check for missing required fields
-    let missing_fields: Vec<_> = fields
-        .iter()
-        .filter(|field| !ron_fields.contains(&field.name) && !field.type_name.starts_with("Option"))
-        .collect();
+    // Fields are required if they are not Option<T> and the struct doesn't have Default
+    if !has_default {
+        let missing_fields: Vec<_> = fields
+            .iter()
+            .filter(|field| {
+                !ron_fields.contains(&field.name) && !field.type_name.starts_with("Option")
+            })
+            .collect();
 
-    if !missing_fields.is_empty() {
-        let missing_names: Vec<String> = missing_fields.iter().map(|f| f.name.clone()).collect();
+        if !missing_fields.is_empty() {
+            let missing_names: Vec<String> =
+                missing_fields.iter().map(|f| f.name.clone()).collect();
 
-        // Find the struct name position in the content
-        let (line, col_start, col_end) = find_struct_name_position(content);
+            // Find the struct name position in the content
+            let (line, col_start, col_end) = find_struct_name_position(content);
 
-        diagnostics.push(Diagnostic {
-            range: Range::new(Position::new(line, col_start), Position::new(line, col_end)),
-            severity: Some(DiagnosticSeverity::WARNING),
-            message: format!("Missing fields: {}", missing_names.join(", ")),
-            ..Default::default()
-        });
+            diagnostics.push(Diagnostic {
+                range: Range::new(Position::new(line, col_start), Position::new(line, col_end)),
+                severity: Some(DiagnosticSeverity::WARNING),
+                message: format!("Missing fields: {}", missing_names.join(", ")),
+                ..Default::default()
+            });
+        }
     }
 
     diagnostics

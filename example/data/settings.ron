@@ -1,0 +1,9 @@
+/* @[crate::models::Settings] */
+Settings(
+    // This Settings struct does NOT have #[derive(Default)]
+    // So the LSP will show warnings for missing required fields
+    // Try using the code action "Add all required fields" to fill them in!
+    app_name: "My App",
+    // Missing: version, features
+    // The LSP should show: "Missing fields: version, features"
+)

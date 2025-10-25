@@ -79,6 +79,46 @@ pub struct Comment {
     pub parent_id: Option<u32>,
 }
 
+/// Configuration struct with Default implementation
+/// This allows RON files to omit fields and use defaults
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct Config {
+    /// Server host address
+    pub host: String,
+
+    /// Server port number
+    pub port: u16,
+
+    /// Maximum number of connections
+    pub max_connections: u32,
+
+    /// Enable debug logging
+    pub debug: bool,
+
+    /// Optional API key
+    pub api_key: Option<String>,
+
+    /// List of allowed origins for CORS
+    pub allowed_origins: Vec<String>,
+}
+
+/// A settings struct without Default
+/// All non-Option fields are required in RON files
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Settings {
+    /// Application name
+    pub app_name: String,
+
+    /// Application version
+    pub version: String,
+
+    /// Optional description
+    pub description: Option<String>,
+
+    /// Feature flags enabled
+    pub features: Vec<String>,
+}
+
 /// Test struct for validating standard library generic types
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GenericTest {
