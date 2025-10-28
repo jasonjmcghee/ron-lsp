@@ -437,56 +437,6 @@ async fn validate_variant_field_data(
     diagnostics
 }
 
-/// Sync version: validate enum variants without field type checking
-fn validate_enum_variant(
-    content: &str,
-    variants: &[EnumVariant],
-    type_info: &TypeInfo,
-) -> Vec<Diagnostic> {
-    let mut diagnostics = Vec::new();
-
-    // For enums, we need to parse the variant from the raw text
-    let parsed_variant = extract_enum_variant_from_text(content);
-
-    if let Some(variant) = parsed_variant {
-        // Check if this variant exists
-        if let Some(variant_def) = variants.iter().find(|v| v.name == variant.name) {
-            // Variant exists - now validate its fields if it has data
-            if variant.data.is_some() && variant_def.fields.is_empty() {
-                // Unit variant should not have data
-                diagnostics.push(Diagnostic {
-                    range: Range::new(
-                        Position::new(variant.line, variant.col),
-                        Position::new(variant.line, variant.col + variant.name.len() as u32),
-                    ),
-                    severity: Some(DiagnosticSeverity::ERROR),
-                    message: format!(
-                        "Variant '{}' is a unit variant and cannot have data",
-                        variant.name
-                    ),
-                    ..Default::default()
-                });
-            }
-            // Note: Full field validation requires RustAnalyzer and is done in the async version
-        } else {
-            // Variant doesn't exist
-            diagnostics.push(Diagnostic {
-                range: Range::new(
-                    Position::new(variant.line, variant.col),
-                    Position::new(variant.line, variant.col + variant.name.len() as u32),
-                ),
-                severity: Some(DiagnosticSeverity::ERROR),
-                message: format!(
-                    "Unknown variant '{}' for enum '{}'",
-                    variant.name, type_info.name
-                ),
-                ..Default::default()
-            });
-        }
-    }
-
-    diagnostics
-}
 
 /// Extract a map from a RON value (handles both raw maps and named struct syntax)
 fn extract_map_from_value(value: &Value) -> Option<&ron::Map> {
@@ -1171,131 +1121,11 @@ mod tests {
     use super::*;
     use crate::rust_analyzer::{EnumVariant, FieldInfo};
 
-    /// Sync version of struct validation (for tests, no analyzer)
-    fn validate_struct_fields_sync(
-        content: &str,
-        fields: &[FieldInfo],
-        parsed_value: &Result<Value, ron::error::SpannedError>,
-    ) -> Vec<Diagnostic> {
-        let mut diagnostics = Vec::new();
 
-        // Extract fields from RON using proper parsing
-        let ron_fields = ron_parser::extract_fields_from_ron(content);
 
-        // Check for unknown fields
-        for ron_field in &ron_fields {
-            if !fields.iter().any(|f| &f.name == ron_field) {
-                for (line_num, line) in content.lines().enumerate() {
-                    if let Some(start_col) = line
-                        .find(&format!("{}: ", ron_field))
-                        .or_else(|| line.find(&format!("{}:", ron_field)))
-                    {
-                        diagnostics.push(Diagnostic {
-                            range: Range::new(
-                                Position::new(line_num as u32, start_col as u32),
-                                Position::new(
-                                    line_num as u32,
-                                    (start_col + ron_field.len()) as u32,
-                                ),
-                            ),
-                            severity: Some(DiagnosticSeverity::ERROR),
-                            message: format!("Unknown field '{}'", ron_field),
-                            ..Default::default()
-                        });
-                        break;
-                    }
-                }
-            }
-        }
-
-        // Type check each field
-        if let Ok(ref value) = parsed_value {
-            let map = extract_map_from_value(value);
-
-            if let Some(map) = map {
-                for field in fields {
-                    if let Some(field_value) = map.get(&Value::String(field.name.clone())) {
-                        let type_mismatch = check_type_mismatch_deep(
-                            field_value,
-                            &field.type_name,
-                            content,
-                            &field.name,
-                        );
-                        if let Some(error_msg) = type_mismatch {
-                            if let Some((line_num, col_start, col_end)) =
-                                find_field_value_position(content, &field.name)
-                            {
-                                diagnostics.push(Diagnostic {
-                                    range: Range::new(
-                                        Position::new(line_num as u32, col_start as u32),
-                                        Position::new(line_num as u32, col_end as u32),
-                                    ),
-                                    severity: Some(DiagnosticSeverity::ERROR),
-                                    message: format!("Type mismatch: {}", error_msg),
-                                    ..Default::default()
-                                });
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Check for missing required fields
-        let missing_fields: Vec<_> = fields
-            .iter()
-            .filter(|field| {
-                !ron_fields.contains(&field.name) && !field.type_name.starts_with("Option")
-            })
-            .collect();
-
-        if !missing_fields.is_empty() {
-            let missing_names: Vec<String> =
-                missing_fields.iter().map(|f| f.name.clone()).collect();
-
-            // Find the struct name position in the content
-            let (line, col_start, col_end) = find_struct_name_position(content);
-
-            diagnostics.push(Diagnostic {
-                range: Range::new(Position::new(line, col_start), Position::new(line, col_end)),
-                severity: Some(DiagnosticSeverity::ERROR),
-                message: format!("Required fields: {}", missing_names.join(", ")),
-                ..Default::default()
-            });
-        }
-
-        diagnostics
-    }
-
-    /// Synchronous version for tests (without analyzer)
-    pub fn validate_ron_against_type(content: &str, type_info: &TypeInfo) -> Vec<Diagnostic> {
-        let mut diagnostics = Vec::new();
-
-        // First check for syntax errors - if there are any, return them immediately
-        // Don't try to do type checking on invalid RON
-        let syntax_errors = validate_ron_syntax(content);
-        if !syntax_errors.is_empty() {
-            return syntax_errors;
-        }
-
-        // Try to parse the RON content to get actual values
-        let parsed_value = ron::from_str::<Value>(content);
-
-        match &type_info.kind {
-            TypeKind::Struct(fields) => {
-                // Use blocking version for sync function
-                diagnostics.extend(validate_struct_fields_sync(content, fields, &parsed_value));
-            }
-            TypeKind::Enum(variants) => {
-                diagnostics.extend(validate_enum_variant(content, variants, type_info));
-            }
-        }
-
-        diagnostics
-    }
-
-    #[test]
-    fn test_enum_variant_validation() {
+    #[tokio::test]
+    async fn test_enum_variant_validation() {
+        let analyzer = Arc::new(RustAnalyzer::new());
         let type_info = TypeInfo {
             name: "PostType".to_string(),
             kind: TypeKind::Enum(vec![
@@ -1323,7 +1153,7 @@ mod tests {
 
         // Valid enum variant
         let content = "Long";
-        let diagnostics = validate_ron_against_type(content, &type_info);
+        let diagnostics = validate_ron_with_analyzer(content, &type_info, analyzer.clone()).await;
         assert_eq!(
             diagnostics.len(),
             0,
@@ -1333,7 +1163,7 @@ mod tests {
 
         // Another valid variant
         let content = "Short";
-        let diagnostics = validate_ron_against_type(content, &type_info);
+        let diagnostics = validate_ron_with_analyzer(content, &type_info, analyzer.clone()).await;
         assert_eq!(
             diagnostics.len(),
             0,
@@ -1343,7 +1173,7 @@ mod tests {
 
         // Invalid enum variant
         let content = "Medium";
-        let diagnostics = validate_ron_against_type(content, &type_info);
+        let diagnostics = validate_ron_with_analyzer(content, &type_info, analyzer.clone()).await;
         assert_eq!(diagnostics.len(), 1, "Medium should be invalid");
         assert!(
             diagnostics[0].message.contains("Unknown variant 'Medium'"),
@@ -1353,7 +1183,7 @@ mod tests {
 
         // Invalid enum variant (typo)
         let content = "Longs";
-        let diagnostics = validate_ron_against_type(content, &type_info);
+        let diagnostics = validate_ron_with_analyzer(content, &type_info, analyzer.clone()).await;
         assert_eq!(diagnostics.len(), 1, "Longs should be invalid");
         assert!(
             diagnostics[0].message.contains("Unknown variant 'Longs'"),
@@ -1362,8 +1192,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_struct_with_enum_field() {
+    #[tokio::test]
+    async fn test_struct_with_enum_field() {
+        let analyzer = Arc::new(RustAnalyzer::new());
         let type_info = TypeInfo {
             name: "Post".to_string(),
             kind: TypeKind::Struct(vec![
@@ -1402,7 +1233,7 @@ mod tests {
             title: "Test",
             post_type: Long,
         )"#;
-        let diagnostics = validate_ron_against_type(content, &type_info);
+        let diagnostics = validate_ron_with_analyzer(content, &type_info, analyzer).await;
         assert_eq!(
             diagnostics.len(),
             0,
@@ -1411,8 +1242,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_struct_field_expects_struct_not_primitive() {
+    #[tokio::test]
+    async fn test_struct_field_expects_struct_not_primitive() {
+        let analyzer = Arc::new(RustAnalyzer::new());
         let type_info = TypeInfo {
             name: "Post".to_string(),
             kind: TypeKind::Struct(vec![
@@ -1443,7 +1275,7 @@ mod tests {
             id: 101,
             author: 1,
         )"#;
-        let diagnostics = validate_ron_against_type(content, &type_info);
+        let diagnostics = validate_ron_with_analyzer(content, &type_info, analyzer.clone()).await;
         assert!(
             diagnostics.len() > 0,
             "Should error on primitive when expecting struct"
@@ -1461,7 +1293,7 @@ mod tests {
             id: 101,
             author: User(id: 1, name: "John"),
         )"#;
-        let diagnostics = validate_ron_against_type(content, &type_info);
+        let diagnostics = validate_ron_with_analyzer(content, &type_info, analyzer).await;
         assert_eq!(
             diagnostics.len(),
             0,
@@ -1470,8 +1302,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_type_mismatch_primitives() {
+    #[tokio::test]
+    async fn test_type_mismatch_primitives() {
+        let analyzer = Arc::new(RustAnalyzer::new());
         let type_info = TypeInfo {
             name: "User".to_string(),
             kind: TypeKind::Struct(vec![
@@ -1502,7 +1335,7 @@ mod tests {
             id: "not a number",
             name: "John",
         )"#;
-        let diagnostics = validate_ron_against_type(content, &type_info);
+        let diagnostics = validate_ron_with_analyzer(content, &type_info, analyzer).await;
         assert!(diagnostics.len() > 0, "Should error on type mismatch");
         assert!(
             diagnostics
@@ -1535,9 +1368,10 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_invalid_enum_in_struct_field() {
+    #[tokio::test]
+    async fn test_invalid_enum_in_struct_field() {
         // This test ensures that invalid enum variants in struct fields are caught
+        let analyzer = Arc::new(RustAnalyzer::new());
         let type_info = TypeInfo {
             name: "Post".to_string(),
             kind: TypeKind::Struct(vec![
@@ -1570,14 +1404,15 @@ mod tests {
             id: 1,
             post_type: Longs,
         )"#;
-        let diagnostics = validate_ron_against_type(content, &type_info);
+        let diagnostics = validate_ron_with_analyzer(content, &type_info, analyzer).await;
         // Without analyzer, this won't be caught - that's expected
         // With analyzer (in real LSP), check_type_mismatch_with_enum_validation will catch it
         println!("Diagnostics for invalid enum variant: {:?}", diagnostics);
     }
 
-    #[test]
-    fn test_unnamed_struct_syntax() {
+    #[tokio::test]
+    async fn test_unnamed_struct_syntax() {
+        let analyzer = Arc::new(RustAnalyzer::new());
         let type_info = TypeInfo {
             name: "User".to_string(),
             kind: TypeKind::Struct(vec![
@@ -1608,7 +1443,7 @@ mod tests {
             id: 1,
             name: "John",
         )"#;
-        let diagnostics = validate_ron_against_type(content, &type_info);
+        let diagnostics = validate_ron_with_analyzer(content, &type_info, analyzer).await;
         assert_eq!(
             diagnostics.len(),
             0,
@@ -1617,8 +1452,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_enum_with_tuple_variant() {
+    #[tokio::test]
+    async fn test_enum_with_tuple_variant() {
+        let analyzer = Arc::new(RustAnalyzer::new());
         let type_info = TypeInfo {
             name: "Value".to_string(),
             kind: TypeKind::Enum(vec![
@@ -1658,7 +1494,7 @@ mod tests {
 
         // Valid tuple variant
         let content = "Int(42)";
-        let diagnostics = validate_ron_against_type(content, &type_info);
+        let diagnostics = validate_ron_with_analyzer(content, &type_info, analyzer.clone()).await;
         assert_eq!(
             diagnostics.len(),
             0,
@@ -1668,7 +1504,7 @@ mod tests {
 
         // Another valid variant
         let content = r#"Str("hello")"#;
-        let diagnostics = validate_ron_against_type(content, &type_info);
+        let diagnostics = validate_ron_with_analyzer(content, &type_info, analyzer).await;
         assert_eq!(
             diagnostics.len(),
             0,
@@ -1677,8 +1513,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_enum_with_struct_variant() {
+    #[tokio::test]
+    async fn test_enum_with_struct_variant() {
+        let analyzer = Arc::new(RustAnalyzer::new());
         let type_info = TypeInfo {
             name: "Message".to_string(),
             kind: TypeKind::Enum(vec![EnumVariant {
@@ -1712,7 +1549,7 @@ mod tests {
 
         // Struct-like variant (this requires parentheses in RON)
         let content = r#"Text { content: "hello", sender: "alice" }"#;
-        let diagnostics = validate_ron_against_type(content, &type_info);
+        let diagnostics = validate_ron_with_analyzer(content, &type_info, analyzer).await;
         // This might not validate correctly without proper struct-variant handling
         // but we're testing that it parses and doesn't crash
         println!("Struct variant diagnostics: {:?}", diagnostics);
@@ -1766,8 +1603,9 @@ PostReference(Post(
         assert!(data.contains("id: 42"));
     }
 
-    #[test]
-    fn test_unit_variant_with_data_error() {
+    #[tokio::test]
+    async fn test_unit_variant_with_data_error() {
+        let analyzer = Arc::new(RustAnalyzer::new());
         let type_info = TypeInfo {
             name: "Status".to_string(),
             kind: TypeKind::Enum(vec![
@@ -1795,7 +1633,7 @@ PostReference(Post(
 
         // Unit variant should not have data
         let content = "Active(123)";
-        let diagnostics = validate_ron_against_type(content, &type_info);
+        let diagnostics = validate_ron_with_analyzer(content, &type_info, analyzer).await;
         // Should get error for providing data to unit variant
         assert!(
             diagnostics.iter().any(|d| d
