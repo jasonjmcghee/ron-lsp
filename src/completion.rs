@@ -84,23 +84,38 @@ pub async fn generate_completions(
     type_info: &TypeInfo,
     analyzer: Arc<RustAnalyzer>,
 ) -> Vec<CompletionItem> {
-    // First check if we're inside a nested type context
-    if let Some(nested_type_name) = find_current_type_context(content, position) {
-        // We're inside a nested struct/enum - provide completions for THAT type
-        if let Some(nested_type_info) = analyzer.get_type_info(&nested_type_name).await {
-            return generate_field_completions(content, &nested_type_info);
+    // Find nested type contexts at cursor position
+    let contexts = ron_parser::find_type_context_at_position(content, position);
+
+    // Navigate through contexts to find the innermost type
+    let mut current_type_info = Some(type_info.clone());
+
+    for context in contexts.iter().skip(1) {
+        // Skip first since it's the top-level type we already have
+        if let Some(info) = current_type_info {
+            // Try to find the context type as a field's type
+            if let Some(fields) = info.fields() {
+                if let Some(field) = fields.iter().find(|f| f.type_name.contains(&context.type_name)) {
+                    current_type_info = analyzer.get_type_info(&field.type_name).await;
+                    continue;
+                }
+            }
+            // Try as direct type lookup
+            current_type_info = analyzer.get_type_info(&context.type_name).await;
         }
     }
+
+    let effective_type = current_type_info.as_ref().unwrap_or(type_info);
 
     let context = get_completion_context(content, position);
 
     match context {
-        CompletionContext::FieldName => generate_field_completions(content, type_info),
+        CompletionContext::FieldName => generate_field_completions(content, effective_type),
         CompletionContext::FieldValue => {
             // Find the field we're completing the value for
             if let Some(field_name) = find_current_field(content, position) {
                 let mut completions =
-                    generate_value_completions_for_field(field_name, type_info, analyzer.clone())
+                    generate_value_completions_for_field(field_name, effective_type, analyzer.clone())
                         .await;
 
                 // Also add all workspace symbols as potential completions
@@ -114,7 +129,7 @@ pub async fn generate_completions(
         CompletionContext::StructType => {
             // Find the field type and provide struct completions
             if let Some(field_name) = find_current_field(content, position) {
-                generate_type_completions_for_field(field_name, type_info, analyzer).await
+                generate_type_completions_for_field(field_name, effective_type, analyzer).await
             } else {
                 Vec::new()
             }

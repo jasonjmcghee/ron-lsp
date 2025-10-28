@@ -30,6 +30,8 @@ pub struct User {
 pub enum PostType {
     Short,
     Long,
+    Described(String),
+    Detailed { length: usize }
 }
 
 /// A blog post
@@ -163,4 +165,65 @@ pub struct GenericTest {
 
     /// Bad: Should be Box<u32> but will receive wrong type
     pub bad_box: Box<u32>,
+}
+
+/// Status enum with different variant types for testing
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum Status {
+    /// A simple unit variant
+    Active,
+
+    /// A unit variant for inactive state
+    Inactive,
+
+    /// A tuple variant with a single u32 reason code
+    Error(u32),
+
+    /// A tuple variant with message
+    Warning(String),
+
+    /// A struct-like variant with named fields
+    Processing { progress: u32, stage: String },
+}
+
+/// Message enum demonstrating nested types
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum Message {
+    /// Simple text message
+    Text(String),
+
+    /// Image with URL and optional caption
+    Image { url: String, caption: Option<String> },
+
+    /// Post reference containing nested Post struct
+    PostReference(Post),
+
+    /// Multiple users tagged
+    UserTag(Vec<User>),
+}
+
+/// Product for demonstrating unnamed struct syntax
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Product {
+    /// Product ID
+    pub id: u32,
+
+    /// Product name
+    pub name: String,
+
+    /// Price in cents
+    pub price: u32,
+
+    /// Nested manufacturer info
+    pub manufacturer: Manufacturer,
+}
+
+/// Manufacturer information
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Manufacturer {
+    /// Manufacturer name
+    pub name: String,
+
+    /// Country of origin
+    pub country: String,
 }

@@ -1,0 +1,22 @@
+/* @[crate::models::Message] */
+
+// Complex nested enum variant with Post containing User
+PostReference(Post(
+    id: 42,
+    title: "Enum Variants in RON",
+    content: "Shows tuple variants, struct variants, and nesting",
+    author: User(
+        id: 1,
+        name: "Alice",
+        email: "alice@example.com",
+        age: 30,
+        bio: Some("Rust developer"),
+        is_active: true,
+        roles: ["admin"],
+        invalid_field: "should error",
+    ),
+    likes: 100,
+    tags: ["rust", "ron"],
+    published: true,
+    post_type: Detailed( length: 1 ),
+))

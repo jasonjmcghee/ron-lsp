@@ -25,14 +25,24 @@ pub async fn validate_ron_with_analyzer(
 ) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
 
-    // First check for syntax errors
-    let syntax_errors = validate_ron_syntax(content);
-    if !syntax_errors.is_empty() {
-        return syntax_errors;
-    }
-
+    // Parse RON once and check for syntax errors from the result
     // Try to parse the RON content
     let parsed_value = ron::from_str::<Value>(content);
+
+    // If parsing failed, return syntax error
+    if let Err(e) = &parsed_value {
+        let error_msg = e.to_string();
+        let (line, col) = parse_error_position(&error_msg, content);
+        let simplified_msg = simplify_ron_error(&error_msg);
+
+        diagnostics.push(Diagnostic {
+            range: Range::new(Position::new(line, col), Position::new(line, col + 1)),
+            severity: Some(DiagnosticSeverity::ERROR),
+            message: simplified_msg,
+            ..Default::default()
+        });
+        return diagnostics;
+    }
 
     match &type_info.kind {
         TypeKind::Struct(fields) => {
@@ -48,11 +58,25 @@ pub async fn validate_ron_with_analyzer(
             );
         }
         TypeKind::Enum(variants) => {
-            diagnostics.extend(validate_enum_variant(content, variants, type_info));
+            diagnostics.extend(
+                validate_enum_variant_with_fields(content, variants, type_info, &analyzer).await,
+            );
         }
     }
 
     diagnostics
+}
+
+/// Adjust diagnostic line numbers by an offset
+fn adjust_diagnostic_positions(diagnostics: Vec<Diagnostic>, line_offset: u32) -> Vec<Diagnostic> {
+    diagnostics
+        .into_iter()
+        .map(|mut d| {
+            d.range.start.line += line_offset;
+            d.range.end.line += line_offset;
+            d
+        })
+        .collect()
 }
 
 /// Convert LSP diagnostics to portable format
@@ -121,8 +145,43 @@ async fn validate_struct_fields(
         let map = extract_map_from_value(value);
 
         if let Some(map) = map {
+            // Pre-compute field positions and contents in a single pass
+            let mut field_positions = std::collections::HashMap::new();
+            let mut field_contents = std::collections::HashMap::new();
+
+            for field in fields {
+                if let Some(pos) = find_field_value_position(content, &field.name) {
+                    field_positions.insert(field.name.clone(), pos);
+                }
+                if let Some(content_str) = extract_field_value_text(content, &field.name) {
+                    field_contents.insert(field.name.clone(), content_str);
+                }
+            }
+
             for field in fields {
                 if let Some(field_value) = map.get(&Value::String(field.name.clone())) {
+                    // For custom types (structs/enums), recursively validate
+                    if let Some(analyzer) = analyzer {
+                        if !is_primitive_type(&field.type_name) && !is_std_generic_type(&field.type_name) {
+                            if let Some(nested_type_info) = analyzer.get_type_info(&field.type_name).await {
+                                // Use pre-extracted position and content
+                                if let Some(&(line_num, _, _)) = field_positions.get(&field.name) {
+                                    if let Some(field_content) = field_contents.get(&field.name) {
+                                        let mut nested_diags = Box::pin(validate_ron_with_analyzer(
+                                            field_content,
+                                            &nested_type_info,
+                                            analyzer.clone(),
+                                        )).await;
+                                        // Adjust line numbers to match the original file
+                                        nested_diags = adjust_diagnostic_positions(nested_diags, line_num as u32);
+                                        diagnostics.extend(nested_diags);
+                                        continue; // Skip type checking since we did full validation
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     // Check type - with enum validation if analyzer is available
                     let type_mismatch = if let Some(analyzer) = analyzer {
                         check_type_mismatch_with_enum_validation(
@@ -143,9 +202,8 @@ async fn validate_struct_fields(
                     };
 
                     if let Some(error_msg) = type_mismatch {
-                        if let Some((line_num, col_start, col_end)) =
-                            find_field_value_position(content, &field.name)
-                        {
+                        // Use pre-computed position
+                        if let Some(&(line_num, col_start, col_end)) = field_positions.get(&field.name) {
                             diagnostics.push(Diagnostic {
                                 range: Range::new(
                                     Position::new(line_num as u32, col_start as u32),
@@ -191,7 +249,195 @@ async fn validate_struct_fields(
     diagnostics
 }
 
-/// Helper to validate enum variants
+/// Async version: validate enum variants with field type checking
+async fn validate_enum_variant_with_fields(
+    content: &str,
+    variants: &[EnumVariant],
+    type_info: &TypeInfo,
+    analyzer: &Arc<RustAnalyzer>,
+) -> Vec<Diagnostic> {
+    let mut diagnostics = Vec::new();
+
+    // For enums, we need to parse the variant from the raw text
+    let parsed_variant = extract_enum_variant_from_text(content);
+
+    if let Some(variant) = parsed_variant {
+        // Check if this variant exists
+        if let Some(variant_def) = variants.iter().find(|v| v.name == variant.name) {
+            // Variant exists - now validate its fields if it has data
+            if let Some(ref data) = variant.data {
+                // Validate that the variant can have data
+                if variant_def.fields.is_empty() {
+                    diagnostics.push(Diagnostic {
+                        range: Range::new(
+                            Position::new(variant.line, variant.col),
+                            Position::new(variant.line, variant.col + variant.name.len() as u32),
+                        ),
+                        severity: Some(DiagnosticSeverity::ERROR),
+                        message: format!(
+                            "Variant '{}' is a unit variant and cannot have data",
+                            variant.name
+                        ),
+                        ..Default::default()
+                    });
+                } else {
+                    // Validate the fields
+                    let mut field_diagnostics =
+                        validate_variant_field_data(data, &variant_def.fields, analyzer).await;
+                    // Adjust positions to account for the variant line offset
+                    field_diagnostics = adjust_diagnostic_positions(field_diagnostics, variant.line);
+                    diagnostics.extend(field_diagnostics);
+                }
+            }
+        } else {
+            // Variant doesn't exist
+            diagnostics.push(Diagnostic {
+                range: Range::new(
+                    Position::new(variant.line, variant.col),
+                    Position::new(variant.line, variant.col + variant.name.len() as u32),
+                ),
+                severity: Some(DiagnosticSeverity::ERROR),
+                message: format!(
+                    "Unknown variant '{}' for enum '{}'",
+                    variant.name, type_info.name
+                ),
+                ..Default::default()
+            });
+        }
+    }
+
+    diagnostics
+}
+
+/// Validate the data inside an enum variant (tuple or struct fields)
+/// This recursively validates nested types
+async fn validate_variant_field_data(
+    data: &str,
+    expected_fields: &[FieldInfo],
+    analyzer: &Arc<RustAnalyzer>,
+) -> Vec<Diagnostic> {
+    let mut diagnostics = Vec::new();
+
+    // For single-field tuple variants with custom types, recursively validate
+    if expected_fields.len() == 1 && !is_primitive_type(&expected_fields[0].type_name) && !is_std_generic_type(&expected_fields[0].type_name) {
+        let field_type = &expected_fields[0].type_name;
+        if let Some(nested_type_info) = analyzer.get_type_info(field_type).await {
+            // Recursively validate the nested content (box to avoid infinite size)
+            // Note: For enum variants, the 'data' string already has correct relative positions
+            // within the extracted content, but we don't have the parent context here to adjust them
+            let nested_diags = Box::pin(validate_ron_with_analyzer(data, &nested_type_info, analyzer.clone())).await;
+            diagnostics.extend(nested_diags);
+            return diagnostics;
+        }
+    }
+
+    // Try to parse the data as RON
+    // For struct variants, the data contains named fields like "field1: val, field2: val"
+    // For tuple variants, the data contains unnamed values like "val1, val2"
+    let has_named_fields = expected_fields.iter().any(|f| f.name.parse::<usize>().is_err());
+
+    let parsed_data = if has_named_fields {
+        // Struct-like variant: wrap the named fields in parentheses for RON parsing
+        // RON syntax for struct variants is: VariantName( field: value )
+        ron::from_str::<Value>(&format!("Temp({})", data))
+    } else if data.contains(',') || expected_fields.len() > 1 {
+        // Tuple variant with multiple fields
+        ron::from_str::<Value>(&format!("({})", data))
+    } else {
+        // Single unnamed field
+        ron::from_str::<Value>(data)
+    };
+
+    match parsed_data {
+        Ok(value) => {
+            // Validate fields based on whether it's named or unnamed
+            if expected_fields.iter().all(|f| f.name.parse::<usize>().is_err()) {
+                // Named fields (struct-like variant)
+                if let Some(map) = extract_map_from_value(&value) {
+                    for field in expected_fields {
+                        if let Some(field_value) = map.get(&Value::String(field.name.clone())) {
+                            if let Some(error_msg) = check_type_mismatch_with_enum_validation(
+                                field_value,
+                                &field.type_name,
+                                data,
+                                &field.name,
+                                analyzer,
+                            )
+                            .await
+                            {
+                                diagnostics.push(Diagnostic {
+                                    range: Range::new(Position::new(0, 0), Position::new(0, 1)),
+                                    severity: Some(DiagnosticSeverity::ERROR),
+                                    message: format!("Type mismatch in variant field: {}", error_msg),
+                                    ..Default::default()
+                                });
+                            }
+                        }
+                    }
+                }
+            } else {
+                // Unnamed fields (tuple variant)
+                // For tuple variants, fields are named "0", "1", "2", etc.
+                if let Value::Seq(values) = value {
+                    for (i, field) in expected_fields.iter().enumerate() {
+                        if let Some(field_value) = values.get(i) {
+                            if let Some(error_msg) = check_type_mismatch_with_enum_validation(
+                                field_value,
+                                &field.type_name,
+                                data,
+                                &field.name,
+                                analyzer,
+                            )
+                            .await
+                            {
+                                diagnostics.push(Diagnostic {
+                                    range: Range::new(Position::new(0, 0), Position::new(0, 1)),
+                                    severity: Some(DiagnosticSeverity::ERROR),
+                                    message: format!(
+                                        "Type mismatch in variant field {}: {}",
+                                        i, error_msg
+                                    ),
+                                    ..Default::default()
+                                });
+                            }
+                        }
+                    }
+                } else if expected_fields.len() == 1 {
+                    // Single field tuple variant
+                    if let Some(error_msg) = check_type_mismatch_with_enum_validation(
+                        &value,
+                        &expected_fields[0].type_name,
+                        data,
+                        &expected_fields[0].name,
+                        analyzer,
+                    )
+                    .await
+                    {
+                        diagnostics.push(Diagnostic {
+                            range: Range::new(Position::new(0, 0), Position::new(0, 1)),
+                            severity: Some(DiagnosticSeverity::ERROR),
+                            message: format!("Type mismatch in variant field: {}", error_msg),
+                            ..Default::default()
+                        });
+                    }
+                }
+            }
+        }
+        Err(_) => {
+            // Failed to parse - could be syntax error
+            diagnostics.push(Diagnostic {
+                range: Range::new(Position::new(0, 0), Position::new(0, 1)),
+                severity: Some(DiagnosticSeverity::ERROR),
+                message: "Invalid syntax in enum variant data".to_string(),
+                ..Default::default()
+            });
+        }
+    }
+
+    diagnostics
+}
+
+/// Sync version: validate enum variants without field type checking
 fn validate_enum_variant(
     content: &str,
     variants: &[EnumVariant],
@@ -200,22 +446,39 @@ fn validate_enum_variant(
     let mut diagnostics = Vec::new();
 
     // For enums, we need to parse the variant from the raw text
-    let variant_name = extract_enum_variant_from_text(content);
+    let parsed_variant = extract_enum_variant_from_text(content);
 
-    if let Some(variant) = variant_name {
+    if let Some(variant) = parsed_variant {
         // Check if this variant exists
-        if !variants.iter().any(|v| v.name == variant) {
-            // Find the position of the variant in the content
-            let (line, col) = find_variant_position(content, &variant);
+        if let Some(variant_def) = variants.iter().find(|v| v.name == variant.name) {
+            // Variant exists - now validate its fields if it has data
+            if variant.data.is_some() && variant_def.fields.is_empty() {
+                // Unit variant should not have data
+                diagnostics.push(Diagnostic {
+                    range: Range::new(
+                        Position::new(variant.line, variant.col),
+                        Position::new(variant.line, variant.col + variant.name.len() as u32),
+                    ),
+                    severity: Some(DiagnosticSeverity::ERROR),
+                    message: format!(
+                        "Variant '{}' is a unit variant and cannot have data",
+                        variant.name
+                    ),
+                    ..Default::default()
+                });
+            }
+            // Note: Full field validation requires RustAnalyzer and is done in the async version
+        } else {
+            // Variant doesn't exist
             diagnostics.push(Diagnostic {
                 range: Range::new(
-                    Position::new(line, col),
-                    Position::new(line, col + variant.len() as u32),
+                    Position::new(variant.line, variant.col),
+                    Position::new(variant.line, variant.col + variant.name.len() as u32),
                 ),
                 severity: Some(DiagnosticSeverity::ERROR),
                 message: format!(
                     "Unknown variant '{}' for enum '{}'",
-                    variant, type_info.name
+                    variant.name, type_info.name
                 ),
                 ..Default::default()
             });
@@ -266,25 +529,94 @@ fn is_std_generic_type(type_name: &str) -> bool {
         || clean.starts_with("Arc<")
 }
 
-/// Extract the variant name from raw RON text
-/// Enums can be: Simple (Long), or with data (Long(...))
-fn extract_enum_variant_from_text(content: &str) -> Option<String> {
+/// Parsed enum variant with optional data
+#[derive(Debug, Clone)]
+struct ParsedEnumVariant {
+    name: String,
+    data: Option<String>, // Content inside () or {}, or None for unit variants
+    line: u32,
+    col: u32,
+}
+
+/// Extract the variant name and data from raw RON text
+/// Enums can be: Simple (Long), tuple (Long(...)), or struct-like (Long { ... })
+fn extract_enum_variant_from_text(content: &str) -> Option<ParsedEnumVariant> {
     // Skip comments and find the first non-comment line
-    for line in content.lines() {
+    let mut content_start = 0;
+    for (line_num, line) in content.lines().enumerate() {
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed.starts_with("//") || trimmed.starts_with("/*") {
+            content_start += line.len() + 1; // +1 for newline
             continue;
         }
 
         // Extract the first word (variant name)
-        // Could be just "Long" or "Long(...)" or "Long { ... }"
-        let variant = trimmed
-            .split(|c: char| c == '(' || c == '{' || c.is_whitespace())
-            .next()?
-            .trim();
+        // Could be just "Long" or "Long(...))" or "Long { ... }"
+        let variant_end_pos = trimmed
+            .find(|c: char| c == '(' || c == '{' || c.is_whitespace())
+            .unwrap_or(trimmed.len());
 
-        if !variant.is_empty() {
-            return Some(variant.to_string());
+        let variant_name = trimmed[..variant_end_pos].trim();
+
+        if variant_name.is_empty() {
+            content_start += line.len() + 1;
+            continue;
+        }
+
+        // Find column position in original line
+        let col = line.find(variant_name).unwrap_or(0) as u32;
+
+        // Extract data if present - search from the position in the full content
+        let data = if let Some(paren_pos) = line.find('(') {
+            // Tuple variant: extract content between matching parens from full content
+            let full_start = content_start + (line.len() - trimmed.len()) + paren_pos;
+            extract_balanced_content(content, full_start, '(', ')')
+        } else if let Some(brace_pos) = line.find('{') {
+            // Struct variant: extract content between matching braces from full content
+            let full_start = content_start + (line.len() - trimmed.len()) + brace_pos;
+            extract_balanced_content(content, full_start, '{', '}')
+        } else {
+            // Unit variant
+            None
+        };
+
+        return Some(ParsedEnumVariant {
+            name: variant_name.to_string(),
+            data,
+            line: line_num as u32,
+            col,
+        });
+    }
+
+    None
+}
+
+/// Extract content between balanced delimiters (e.g., matching parens or braces)
+/// Handles nested delimiters and multi-line content
+fn extract_balanced_content(text: &str, start_pos: usize, open: char, close: char) -> Option<String> {
+    let chars: Vec<char> = text[start_pos..].chars().collect();
+    let mut depth = 0;
+    let mut content_start = None;
+    let mut content_end = None;
+
+    for (i, &ch) in chars.iter().enumerate() {
+        if ch == open {
+            depth += 1;
+            if depth == 1 {
+                content_start = Some(i + 1); // Start after opening delimiter
+            }
+        } else if ch == close {
+            depth -= 1;
+            if depth == 0 {
+                content_end = Some(i);
+                break;
+            }
+        }
+    }
+
+    if let (Some(start), Some(end)) = (content_start, content_end) {
+        if start <= end {
+            return Some(chars[start..end].iter().collect());
         }
     }
 
@@ -292,6 +624,7 @@ fn extract_enum_variant_from_text(content: &str) -> Option<String> {
 }
 
 /// Find the position of an enum variant in the content
+#[allow(dead_code)]
 fn find_variant_position(content: &str, variant: &str) -> (u32, u32) {
     for (line_num, line) in content.lines().enumerate() {
         let trimmed = line.trim();
@@ -308,6 +641,7 @@ fn find_variant_position(content: &str, variant: &str) -> (u32, u32) {
 }
 
 /// Find the position of the struct name in the RON content (e.g., "Post" in "Post(...)")
+/// Returns (line, col_start, col_end) where col_start == col_end indicates unnamed struct
 fn find_struct_name_position(content: &str) -> (u32, u32, u32) {
     for (line_num, line) in content.lines().enumerate() {
         let trimmed = line.trim();
@@ -329,6 +663,12 @@ fn find_struct_name_position(content: &str) -> (u32, u32, u32) {
                         col_start as u32,
                         (col_start + struct_name.len()) as u32,
                     );
+                }
+            } else if struct_name.is_empty() {
+                // Unnamed struct syntax: starts with '('
+                // Return position of opening paren with col_start == col_end to indicate no name
+                if let Some(paren_pos) = line.find('(') {
+                    return (line_num as u32, paren_pos as u32, paren_pos as u32);
                 }
             }
         }
@@ -440,13 +780,14 @@ fn check_type_mismatch_deep(
         // Expected a struct/enum
         // The value should start with TypeName( or be a variant name
 
-        // Check if it looks like a struct instantiation TypeName(...)
+        // Check if it looks like a struct instantiation TypeName(...) or unnamed (...)
         if trimmed.contains('(') {
             // Extract the type name before the paren
             let type_in_text = trimmed.split('(').next().unwrap_or("").trim();
             let expected_simple = clean_type.split("::").last().unwrap_or(&clean_type);
 
-            if type_in_text != expected_simple {
+            // Allow unnamed struct syntax - empty type_in_text means type is inferred
+            if !type_in_text.is_empty() && type_in_text != expected_simple {
                 return Some(format!("expected {}, got {}", expected_type, type_in_text));
             }
         } else {
@@ -471,20 +812,75 @@ fn check_type_mismatch_deep(
     None
 }
 
-/// Extract the raw text value for a field
+/// Extract the raw text value for a field, handling nested structures
 fn extract_field_value_text(content: &str, field_name: &str) -> Option<String> {
-    for line in content.lines() {
-        if let Some(field_pos) = line.find(&format!("{}:", field_name)) {
-            // Find where value starts (after colon)
-            let after_colon = &line[field_pos + field_name.len() + 1..];
-            let trimmed = after_colon.trim();
+    // Find the field in the content
+    let field_pattern = format!("{}:", field_name);
+    let field_pos = content.find(&field_pattern)?;
 
-            // Extract until comma or end
-            let value = trimmed.split(',').next()?.trim();
-            return Some(value.to_string());
+    // Find where the value starts (after colon and whitespace)
+    let after_field = &content[field_pos + field_pattern.len()..];
+    let value_start = after_field.len() - after_field.trim_start().len();
+    let value_str = &after_field[value_start..];
+
+    // Now we need to extract the complete value, which might span multiple lines
+    // and contain nested structures
+    let chars: Vec<char> = value_str.chars().collect();
+    let mut depth = 0;
+    let mut in_string = false;
+    let mut escape_next = false;
+    let mut end_pos = None;
+
+    for (i, &ch) in chars.iter().enumerate() {
+        if escape_next {
+            escape_next = false;
+            continue;
+        }
+
+        match ch {
+            '\\' if in_string => escape_next = true,
+            '"' => in_string = !in_string,
+            '(' | '[' | '{' if !in_string => depth += 1,
+            ')' | ']' | '}' if !in_string => {
+                depth -= 1;
+                if depth == 0 {
+                    // We've closed all opened brackets - this is the end of the value
+                    end_pos = Some(i + 1);
+                    break;
+                }
+                if depth < 0 {
+                    // We've reached the end of our parent structure
+                    end_pos = Some(i);
+                    break;
+                }
+            }
+            ',' if !in_string && depth == 0 => {
+                // Found separator at same depth level
+                end_pos = Some(i);
+                break;
+            }
+            '\n' if !in_string && depth == 0 => {
+                // Check if next line is a new field or closing bracket
+                let rest = &chars[i..];
+                let rest_str: String = rest.iter().collect();
+                let next_line = rest_str.lines().nth(1).unwrap_or("").trim();
+                if next_line.starts_with(')') || next_line.starts_with('}') ||
+                   next_line.starts_with(']') || next_line.contains(':') {
+                    end_pos = Some(i);
+                    break;
+                }
+            }
+            _ => {}
         }
     }
-    None
+
+    let value: String = if let Some(end) = end_pos {
+        chars[..end].iter().collect()
+    } else {
+        chars.iter().collect()
+    };
+
+    Some(value.trim().to_string())
 }
 
 /// Check if a RON value matches the expected Rust type
@@ -922,6 +1318,7 @@ mod tests {
             source_file: None,
             line: None,
             column: None,
+            has_default: false,
         };
 
         // Valid enum variant
@@ -996,6 +1393,7 @@ mod tests {
             source_file: None,
             line: None,
             column: None,
+            has_default: false,
         };
 
         // Valid struct with enum field
@@ -1037,6 +1435,7 @@ mod tests {
             source_file: None,
             line: None,
             column: None,
+            has_default: false,
         };
 
         // WRONG: author should be User(...), not just 1
@@ -1095,6 +1494,7 @@ mod tests {
             source_file: None,
             line: None,
             column: None,
+            has_default: false,
         };
 
         // Type mismatch - string for number
@@ -1160,6 +1560,7 @@ mod tests {
             source_file: None,
             line: None,
             column: None,
+            has_default: false,
         };
 
         // Invalid: "Longs" is not a valid PostType variant
@@ -1173,5 +1574,235 @@ mod tests {
         // Without analyzer, this won't be caught - that's expected
         // With analyzer (in real LSP), check_type_mismatch_with_enum_validation will catch it
         println!("Diagnostics for invalid enum variant: {:?}", diagnostics);
+    }
+
+    #[test]
+    fn test_unnamed_struct_syntax() {
+        let type_info = TypeInfo {
+            name: "User".to_string(),
+            kind: TypeKind::Struct(vec![
+                FieldInfo {
+                    name: "id".to_string(),
+                    type_name: "u32".to_string(),
+                    docs: None,
+                    line: None,
+                    column: None,
+                },
+                FieldInfo {
+                    name: "name".to_string(),
+                    type_name: "String".to_string(),
+                    docs: None,
+                    line: None,
+                    column: None,
+                },
+            ]),
+            docs: None,
+            source_file: None,
+            line: None,
+            column: None,
+            has_default: false,
+        };
+
+        // Unnamed struct syntax should be valid
+        let content = r#"(
+            id: 1,
+            name: "John",
+        )"#;
+        let diagnostics = validate_ron_against_type(content, &type_info);
+        assert_eq!(
+            diagnostics.len(),
+            0,
+            "Unnamed struct syntax should be valid. Got errors: {:?}",
+            diagnostics
+        );
+    }
+
+    #[test]
+    fn test_enum_with_tuple_variant() {
+        let type_info = TypeInfo {
+            name: "Value".to_string(),
+            kind: TypeKind::Enum(vec![
+                EnumVariant {
+                    name: "Int".to_string(),
+                    fields: vec![FieldInfo {
+                        name: "0".to_string(),
+                        type_name: "i32".to_string(),
+                        docs: None,
+                        line: None,
+                        column: None,
+                    }],
+                    docs: None,
+                    line: None,
+                    column: None,
+                },
+                EnumVariant {
+                    name: "Str".to_string(),
+                    fields: vec![FieldInfo {
+                        name: "0".to_string(),
+                        type_name: "String".to_string(),
+                        docs: None,
+                        line: None,
+                        column: None,
+                    }],
+                    docs: None,
+                    line: None,
+                    column: None,
+                },
+            ]),
+            docs: None,
+            source_file: None,
+            line: None,
+            column: None,
+            has_default: false,
+        };
+
+        // Valid tuple variant
+        let content = "Int(42)";
+        let diagnostics = validate_ron_against_type(content, &type_info);
+        assert_eq!(
+            diagnostics.len(),
+            0,
+            "Tuple variant should be valid. Got errors: {:?}",
+            diagnostics
+        );
+
+        // Another valid variant
+        let content = r#"Str("hello")"#;
+        let diagnostics = validate_ron_against_type(content, &type_info);
+        assert_eq!(
+            diagnostics.len(),
+            0,
+            "Tuple variant with string should be valid. Got errors: {:?}",
+            diagnostics
+        );
+    }
+
+    #[test]
+    fn test_enum_with_struct_variant() {
+        let type_info = TypeInfo {
+            name: "Message".to_string(),
+            kind: TypeKind::Enum(vec![EnumVariant {
+                name: "Text".to_string(),
+                fields: vec![
+                    FieldInfo {
+                        name: "content".to_string(),
+                        type_name: "String".to_string(),
+                        docs: None,
+                        line: None,
+                        column: None,
+                    },
+                    FieldInfo {
+                        name: "sender".to_string(),
+                        type_name: "String".to_string(),
+                        docs: None,
+                        line: None,
+                        column: None,
+                    },
+                ],
+                docs: None,
+                line: None,
+                column: None,
+            }]),
+            docs: None,
+            source_file: None,
+            line: None,
+            column: None,
+            has_default: false,
+        };
+
+        // Struct-like variant (this requires parentheses in RON)
+        let content = r#"Text { content: "hello", sender: "alice" }"#;
+        let diagnostics = validate_ron_against_type(content, &type_info);
+        // This might not validate correctly without proper struct-variant handling
+        // but we're testing that it parses and doesn't crash
+        println!("Struct variant diagnostics: {:?}", diagnostics);
+    }
+
+    #[test]
+    fn test_ron_parsing_enum_variant() {
+        // Test if RON can parse a standalone enum variant
+        let test_cases = vec![
+            "Detailed( length: 1 )",
+            "Detailed(length: 1)",
+            "Detailed { length: 1 }",
+        ];
+
+        for case in test_cases {
+            println!("Testing: {}", case);
+            let result = ron::from_str::<Value>(case);
+            println!("Result: {:?}", result);
+        }
+    }
+
+    #[test]
+    fn test_extract_field_value_for_enum() {
+        let content = r#"Post(
+    id: 42,
+    post_type: Detailed( length: 1 ),
+)"#;
+        let extracted = extract_field_value_text(content, "post_type");
+        println!("Extracted post_type value: {:?}", extracted);
+        assert!(extracted.is_some());
+        let value = extracted.unwrap();
+        assert_eq!(value, "Detailed( length: 1 )");
+    }
+
+    #[test]
+    fn test_extract_nested_enum_variant() {
+        let content = r#"/* @[crate::models::Message] */
+
+PostReference(Post(
+    id: 42,
+    title: "test",
+))"#;
+        let variant = extract_enum_variant_from_text(content);
+        assert!(variant.is_some());
+        let variant = variant.unwrap();
+        assert_eq!(variant.name, "PostReference");
+        println!("Extracted data: {:?}", variant.data);
+        assert!(variant.data.is_some());
+        let data = variant.data.unwrap();
+        assert!(data.contains("Post("));
+        assert!(data.contains("id: 42"));
+    }
+
+    #[test]
+    fn test_unit_variant_with_data_error() {
+        let type_info = TypeInfo {
+            name: "Status".to_string(),
+            kind: TypeKind::Enum(vec![
+                EnumVariant {
+                    name: "Active".to_string(),
+                    fields: vec![],
+                    docs: None,
+                    line: None,
+                    column: None,
+                },
+                EnumVariant {
+                    name: "Inactive".to_string(),
+                    fields: vec![],
+                    docs: None,
+                    line: None,
+                    column: None,
+                },
+            ]),
+            docs: None,
+            source_file: None,
+            line: None,
+            column: None,
+            has_default: false,
+        };
+
+        // Unit variant should not have data
+        let content = "Active(123)";
+        let diagnostics = validate_ron_against_type(content, &type_info);
+        // Should get error for providing data to unit variant
+        assert!(
+            diagnostics.iter().any(|d| d
+                .message
+                .contains("unit variant") || d.message.contains("cannot have data")),
+            "Should error on unit variant with data. Got: {:?}",
+            diagnostics
+        );
     }
 }

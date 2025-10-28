@@ -67,6 +67,7 @@ pub struct RustAnalyzer {
     workspace_root: RwLock<Option<PathBuf>>,
     type_cache: RwLock<HashMap<String, TypeInfo>>,
     type_aliases: RwLock<HashMap<String, String>>,
+    initial_scan_complete: RwLock<bool>,
 }
 
 impl RustAnalyzer {
@@ -75,6 +76,7 @@ impl RustAnalyzer {
             workspace_root: RwLock::new(None),
             type_cache: RwLock::new(HashMap::new()),
             type_aliases: RwLock::new(HashMap::new()),
+            initial_scan_complete: RwLock::new(false),
         }
     }
 
@@ -82,9 +84,11 @@ impl RustAnalyzer {
         *self.workspace_root.write().await = Some(root.to_path_buf());
         // Trigger initial scan
         self.scan_workspace().await;
+        // Mark initial scan as complete
+        *self.initial_scan_complete.write().await = true;
     }
 
-    async fn scan_workspace(&self) {
+    pub async fn scan_workspace(&self) {
         let root = {
             let guard = self.workspace_root.read().await;
             match guard.as_ref() {
@@ -411,23 +415,29 @@ impl RustAnalyzer {
             }
         }
 
-        // If not in cache, rescan and try again
-        self.scan_workspace().await;
+        // If not in cache and initial scan hasn't completed, rescan
+        let scan_complete = *self.initial_scan_complete.read().await;
+        if !scan_complete {
+            self.scan_workspace().await;
 
-        let cache = self.type_cache.read().await;
-        cache
-            .get(&resolved_type)
-            .cloned()
-            .or_else(|| cache.get(type_path).cloned())
-            .or_else(|| {
-                // Try simple name match after rescan
-                for (key, value) in cache.iter() {
-                    if key.ends_with(&format!("::{}", type_path)) || key == type_path {
-                        return Some(value.clone());
+            let cache = self.type_cache.read().await;
+            return cache
+                .get(&resolved_type)
+                .cloned()
+                .or_else(|| cache.get(type_path).cloned())
+                .or_else(|| {
+                    // Try simple name match after rescan
+                    for (key, value) in cache.iter() {
+                        if key.ends_with(&format!("::{}", type_path)) || key == type_path {
+                            return Some(value.clone());
+                        }
                     }
-                }
-                None
-            })
+                    None
+                });
+        }
+
+        // Initial scan already complete, type not found
+        None
     }
 
     /// Get all types from the workspace
