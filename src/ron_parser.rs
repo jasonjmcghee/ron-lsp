@@ -2,12 +2,22 @@ use ron::Value;
 use std::collections::HashSet;
 use tower_lsp::lsp_types::Position;
 
+/// Information about a variant field location in RON content
+#[derive(Debug, Clone)]
+pub struct VariantFieldLocation {
+    pub line_idx: usize,
+    pub variant_name: String,
+    pub containing_field_name: String,
+    pub field_at_position: Option<String>,
+}
+
 /// Represents the nesting context at a cursor position
 #[derive(Debug, Clone)]
 pub struct TypeContext {
     /// The type name we're currently inside (e.g., "User", "Post")
     pub type_name: String,
     /// The line where this type context starts
+    #[allow(dead_code)]
     pub start_line: usize,
 }
 
@@ -102,6 +112,36 @@ fn extract_type_name_before_paren(text: &str) -> Option<String> {
 }
 
 /// Get the field name at a specific position in RON content
+/// Scan through content and find all variant field locations
+/// This is used by both diagnostics and code actions to process enum variant fields
+pub fn find_all_variant_field_locations(content: &str) -> Vec<VariantFieldLocation> {
+    let mut locations = Vec::new();
+    let lines: Vec<&str> = content.lines().collect();
+
+    for (line_idx, _line) in lines.iter().enumerate() {
+        let position = Position::new(line_idx as u32, 0);
+
+        // Check if we're inside a variant at this position
+        if let Some(variant_name) = find_current_variant_context(content, position) {
+            // Find which field contains this variant
+            if let Some(containing_field_name) = get_containing_field_context(content, position) {
+                // Get the field at this position (might be None if we're not on a field line)
+                let field_at_position = get_field_at_position(content, position);
+
+                locations.push(VariantFieldLocation {
+                    line_idx,
+                    variant_name,
+                    containing_field_name,
+                    field_at_position,
+                });
+            }
+        }
+    }
+
+    locations
+}
+
+/// This looks for "field_name:" on the CURRENT line before the cursor
 pub fn get_field_at_position(content: &str, position: Position) -> Option<String> {
     let lines: Vec<&str> = content.lines().collect();
 
@@ -126,6 +166,42 @@ pub fn get_field_at_position(content: &str, position: Position) -> Option<String
     }
 
     None
+}
+
+/// Get the containing field context by scanning backwards
+/// This is useful when you're nested inside a field's value
+/// For example: "post_type: Detailed(\n    length: 1" - when on "length" line, returns "post_type"
+pub fn get_containing_field_context(content: &str, position: Position) -> Option<String> {
+    let lines: Vec<&str> = content.lines().collect();
+    if position.line as usize >= lines.len() {
+        return None;
+    }
+
+    // Build content up to cursor
+    let mut content_until_cursor = String::new();
+    for (i, line) in lines.iter().enumerate() {
+        if i < position.line as usize {
+            content_until_cursor.push_str(line);
+            content_until_cursor.push('\n');
+        } else if i == position.line as usize {
+            content_until_cursor.push_str(&line[..position.character.min(line.len() as u32) as usize]);
+            break;
+        }
+    }
+
+    // Look for the last field assignment before an opening paren/brace
+    // Pattern: field_name: SomeType(   or   field_name: (
+    let re = regex::Regex::new(r"(\w+)\s*:\s*[A-Z]?\w*\s*[\(\{][^\)\}]*$").ok()?;
+
+    // Find the last match
+    let mut last_field = None;
+    for caps in re.captures_iter(&content_until_cursor) {
+        if let Some(field) = caps.get(1) {
+            last_field = Some(field.as_str().to_string());
+        }
+    }
+
+    last_field
 }
 
 /// Parse RON structure to get all field names present using proper RON parsing
@@ -163,6 +239,99 @@ fn extract_fields_from_value(value: &Value) -> Vec<String> {
     }
 
     fields.into_iter().collect()
+}
+
+/// Find the current variant context in content (for detecting which variant we're inside)
+/// This is useful for code actions and completions
+/// This tracks parentheses depth to find which variant we're actually inside
+pub fn find_current_variant_context(content: &str, position: Position) -> Option<String> {
+    let lines: Vec<&str> = content.lines().collect();
+    if position.line as usize >= lines.len() {
+        return None;
+    }
+
+    // Build content up to cursor position
+    let mut content_until_cursor = String::new();
+    for (i, line) in lines.iter().enumerate() {
+        if i < position.line as usize {
+            content_until_cursor.push_str(line);
+            content_until_cursor.push('\n');
+        } else if i == position.line as usize {
+            content_until_cursor.push_str(&line[..position.character.min(line.len() as u32) as usize]);
+            break;
+        }
+    }
+
+    // Track all variant openings with their depth and name
+    // We want to find the innermost unclosed variant by matching parens
+    let mut variant_stack: Vec<String> = Vec::new();
+    let mut in_string = false;
+    let mut escape_next = false;
+
+    let chars: Vec<char> = content_until_cursor.chars().collect();
+    let mut i = 0;
+
+    while i < chars.len() {
+        let ch = chars[i];
+
+        if escape_next {
+            escape_next = false;
+            i += 1;
+            continue;
+        }
+
+        match ch {
+            '\\' if in_string => escape_next = true,
+            '"' => in_string = !in_string,
+            '(' | '{' if !in_string => {
+                // Look backwards from this position to find the variant name
+                // Could be "Type::Variant(" or just "Variant("
+                let mut j = i;
+                // Skip whitespace backwards
+                while j > 0 && chars[j - 1].is_whitespace() {
+                    j -= 1;
+                }
+
+                if j > 0 {
+                    // Extract the word before the whitespace/paren
+                    let word_end = j;
+                    let mut word_start = j;
+
+                    // Go back to find the start of the word
+                    while word_start > 0 {
+                        let prev_ch = chars[word_start - 1];
+                        if prev_ch.is_alphanumeric() || prev_ch == '_' {
+                            word_start -= 1;
+                        } else if prev_ch == ':' && word_start >= 2 && chars[word_start - 2] == ':' {
+                            // Handle :: syntax, but skip it for the variant name
+                            break;
+                        } else {
+                            break;
+                        }
+                    }
+
+                    if word_start < word_end {
+                        let word: String = chars[word_start..word_end].iter().collect();
+                        // Only consider it a variant if it starts with uppercase
+                        if word.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+                            variant_stack.push(word);
+                        }
+                    }
+                }
+            }
+            ')' | '}' if !in_string => {
+                if !variant_stack.is_empty() {
+                    variant_stack.pop();
+                }
+            }
+            _ => {}
+        }
+
+        i += 1;
+    }
+
+    // Return the last (innermost) variant on the stack
+    variant_stack.last().cloned()
 }
 
 #[cfg(test)]
@@ -306,5 +475,75 @@ Post(
         // operates on individual lines without context
         // The actual validation layer should filter these out
         assert!(field.is_some());
+    }
+
+    #[test]
+    fn test_find_current_variant_context() {
+        // RON uses parentheses for struct variants
+        let content = "MyEnum::StructVariant( field_a: value )";
+        let position = Position::new(0, 25); // Right after the opening paren
+
+        let variant = find_current_variant_context(content, position);
+        assert_eq!(variant, Some("StructVariant".to_string()));
+    }
+
+    #[test]
+    fn test_find_current_variant_context_lowercase() {
+        // Lowercase names (like functions) should not match
+        let content = "my_function(\n    field_a: value\n)";
+        let position = Position::new(1, 10);
+
+        let variant = find_current_variant_context(content, position);
+        assert!(variant.is_none(), "Lowercase names should not match as variants");
+    }
+
+    #[test]
+    fn test_enum_variants_ron_actual_file() {
+        // Load the ACTUAL file content from enum_variants.ron
+        let content = r#"/* @[crate::models::Message] */
+// Complex nested enum variant with Post containing User
+PostReference(
+    Post(
+        id: 42,
+        title: "Enum Variants in RON",
+        content: "Shows tuple variants, struct variants, and nesting",
+        author: User(
+            id: 1,
+            name: "Alice",
+            email: "alice@example.com",
+            age: 30,
+            bio: Some(
+                "Rust developer",
+            ),
+            is_active: true,
+            roles: [
+                "admin",
+            ],
+            invalid_field: "should error",
+        ),
+        likes: 100,
+        tags: [
+            "rust",
+            "ron",
+        ],
+        published: true,
+        post_type: Detailed(
+            length: 1,
+        ),
+    )
+)"#;
+
+        // Position on line 29, on the word "length" (line 28 in 0-indexed)
+        let position = Position::new(28, 16);
+
+        // Test 1: Can we find the variant?
+        let variant = find_current_variant_context(content, position);
+        println!("Variant found: {:?}", variant);
+        assert_eq!(variant, Some("Detailed".to_string()), "Should find Detailed variant");
+
+        // Test 2: Can we find the containing field?
+        let field = get_containing_field_context(content, position);
+        println!("Containing field found: {:?}", field);
+        assert_eq!(field, Some("post_type".to_string()), "Should find post_type as containing field");
     }
 }

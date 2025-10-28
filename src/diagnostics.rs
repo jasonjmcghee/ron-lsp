@@ -64,6 +64,203 @@ pub async fn validate_ron_with_analyzer(
         }
     }
 
+    // Check for enum variant fields (scans the whole file, so only call once)
+    diagnostics.extend(
+        validate_enum_variant_fields_in_structs(content, type_info, &analyzer).await,
+    );
+
+    // Deduplicate diagnostics by message and position
+    let mut seen = std::collections::HashSet::new();
+    diagnostics.retain(|d| {
+        let key = (d.range.start.line, d.range.start.character, d.message.clone());
+        seen.insert(key)
+    });
+
+    diagnostics
+}
+
+/// Validate enum variant fields within struct fields using the same logic as goto_definition
+async fn validate_enum_variant_fields_in_structs(
+    content: &str,
+    type_info: &TypeInfo,
+    analyzer: &Arc<RustAnalyzer>,
+) -> Vec<Diagnostic> {
+    let mut diagnostics = Vec::new();
+    let mut reported_errors = std::collections::HashSet::new();
+
+    // Collect all variant locations and group by variant to check for missing fields
+    let variant_locations = ron_parser::find_all_variant_field_locations(content);
+    let mut variant_info: std::collections::HashMap<(String, String), (usize, std::collections::HashSet<String>)> =
+        std::collections::HashMap::new();
+
+    // Cache for variant type lookups: (containing_field_name, variant_name) -> Option<EnumVariant>
+    let mut variant_cache: std::collections::HashMap<(String, String), Option<EnumVariant>> =
+        std::collections::HashMap::new();
+
+    // First pass: collect all fields present for each variant
+    let lines: Vec<&str> = content.lines().collect();
+    for location in &variant_locations {
+        let key = (location.containing_field_name.clone(), location.variant_name.clone());
+        let entry = variant_info.entry(key).or_insert((location.line_idx, std::collections::HashSet::new()));
+        if let Some(ref field_at_pos) = location.field_at_position {
+            entry.1.insert(field_at_pos.clone());
+        }
+    }
+
+    // Second pass: validate unknown fields - do navigation ONCE per unique variant
+    for ((containing_field_name, variant_name), (first_line, _present_fields)) in &variant_info {
+        // Check if we've already looked up this variant
+        if variant_cache.contains_key(&(containing_field_name.clone(), variant_name.clone())) {
+            continue;
+        }
+
+        // Do the expensive navigation once per unique variant
+        let position = Position::new(*first_line as u32, 0);
+        let mut contexts = vec![ron_parser::TypeContext {
+            type_name: type_info.name.split("::").last().unwrap_or(&type_info.name).to_string(),
+            start_line: 0,
+        }];
+        let mut position_contexts = ron_parser::find_type_context_at_position(content, position);
+        if !position_contexts.is_empty() {
+            position_contexts.pop();
+        }
+        contexts.extend(position_contexts);
+
+        let mut current_type_info = Some(type_info.clone());
+        for context in contexts.iter().skip(1) {
+            let info = match current_type_info {
+                Some(ref info) => info.clone(),
+                None => break,
+            };
+
+            if let Some(fields) = info.fields() {
+                let context_name = &context.type_name;
+                if let Some(field) = fields.iter().find(|f| {
+                    let field_type_last = f.type_name.split("::").last().unwrap_or(&f.type_name);
+                    let field_type_base = field_type_last.split('<').next().unwrap_or(field_type_last);
+                    field_type_base == context_name
+                }) {
+                    current_type_info = analyzer.get_type_info(&field.type_name).await;
+                    continue;
+                }
+            }
+
+            let direct_lookup = analyzer.get_type_info(&context.type_name).await;
+            if direct_lookup.is_some() {
+                current_type_info = direct_lookup;
+            } else {
+                let mut found_via_variant = false;
+                if let Some(variant) = info.find_variant(&context.type_name) {
+                    if variant.fields.len() == 1 {
+                        let field_type = &variant.fields[0].type_name;
+                        current_type_info = analyzer.get_type_info(field_type).await;
+                        found_via_variant = true;
+                    }
+                }
+                if !found_via_variant {
+                    if let Some(fields) = info.fields() {
+                        for field in fields {
+                            if let Some(field_type_info) = analyzer.get_type_info(&field.type_name).await {
+                                if field_type_info.find_variant(&context.type_name).is_some() {
+                                    current_type_info = Some(field_type_info);
+                                    found_via_variant = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                if !found_via_variant {
+                    current_type_info = None;
+                }
+            }
+        }
+
+        // Look up the variant and cache it
+        let variant = if let Some(current_type) = current_type_info {
+            if let Some(field) = current_type.find_field(containing_field_name) {
+                if let Some(field_type_info) = analyzer.get_type_info(&field.type_name).await {
+                    field_type_info.find_variant(variant_name).cloned()
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        variant_cache.insert((containing_field_name.clone(), variant_name.clone()), variant);
+    }
+
+    // Third pass: check all field locations using cached variant info
+    for location in &variant_locations {
+        if let Some(ref field_at_pos) = location.field_at_position {
+            let error_key = (location.line_idx, field_at_pos.clone());
+            if !reported_errors.contains(&error_key) {
+                let cache_key = (location.containing_field_name.clone(), location.variant_name.clone());
+                if let Some(Some(variant)) = variant_cache.get(&cache_key) {
+                    if !variant.fields.iter().any(|f| f.name == *field_at_pos) {
+                        let line = lines.get(location.line_idx).unwrap_or(&"");
+                        if let Some(col) = line.find(&format!("{}:", field_at_pos))
+                            .or_else(|| line.find(&format!("{} :", field_at_pos))) {
+                            diagnostics.push(Diagnostic {
+                                range: Range::new(
+                                    Position::new(location.line_idx as u32, col as u32),
+                                    Position::new(location.line_idx as u32, (col + field_at_pos.len()) as u32),
+                                ),
+                                severity: Some(DiagnosticSeverity::ERROR),
+                                message: format!("Unknown field '{}' in variant '{}'", field_at_pos, location.variant_name),
+                                ..Default::default()
+                            });
+                            reported_errors.insert(error_key);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Fourth pass: check for missing required fields using cached variant info
+    for ((containing_field_name, variant_name), (first_line, present_fields)) in variant_info {
+        let cache_key = (containing_field_name.clone(), variant_name.clone());
+        if let Some(Some(variant)) = variant_cache.get(&cache_key) {
+            // Check for missing required fields
+            for vfield in &variant.fields {
+                if !present_fields.contains(&vfield.name)
+                    && !vfield.type_name.starts_with("Option") {
+                    // Note: We don't have has_default info in the cached variant,
+                    // but typically enum variants don't have defaults
+
+                    // Find the variant opening line to report the error
+                    // Search backwards from first_line to find the line with the variant name
+                    let mut variant_line_idx = first_line;
+                    let mut variant_col = 0;
+                    for i in (0..=first_line).rev() {
+                        if let Some(line) = lines.get(i) {
+                            if let Some(col) = line.find(&variant_name) {
+                                variant_line_idx = i;
+                                variant_col = col;
+                                break;
+                            }
+                        }
+                    }
+
+                    diagnostics.push(Diagnostic {
+                        range: Range::new(
+                            Position::new(variant_line_idx as u32, variant_col as u32),
+                            Position::new(variant_line_idx as u32, (variant_col + variant_name.len()) as u32),
+                        ),
+                        severity: Some(DiagnosticSeverity::ERROR),
+                        message: format!("Missing required field '{}' in variant '{}'", vfield.name, variant_name),
+                        ..Default::default()
+                    });
+                }
+            }
+        }
+    }
+
     diagnostics
 }
 
@@ -354,6 +551,38 @@ async fn validate_variant_field_data(
             if expected_fields.iter().all(|f| f.name.parse::<usize>().is_err()) {
                 // Named fields (struct-like variant)
                 if let Some(map) = extract_map_from_value(&value) {
+                    // First, check for unknown fields - extract from the parsed value, not raw data
+                    let mut ron_fields = Vec::new();
+                    for key in map.keys() {
+                        if let Value::String(field_name) = key {
+                            ron_fields.push(field_name.clone());
+                        }
+                    }
+
+                    for ron_field in &ron_fields {
+                        if !expected_fields.iter().any(|f| &f.name == ron_field) {
+                            // Find the position of this field in the data for better error reporting
+                            for (line_num, line) in data.lines().enumerate() {
+                                if let Some(start_col) = line
+                                    .find(&format!("{}: ", ron_field))
+                                    .or_else(|| line.find(&format!("{}:", ron_field)))
+                                {
+                                    diagnostics.push(Diagnostic {
+                                        range: Range::new(
+                                            Position::new(line_num as u32, start_col as u32),
+                                            Position::new(line_num as u32, (start_col + ron_field.len()) as u32),
+                                        ),
+                                        severity: Some(DiagnosticSeverity::ERROR),
+                                        message: format!("Unknown field '{}' in variant", ron_field),
+                                        ..Default::default()
+                                    });
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    // Then validate field types
                     for field in expected_fields {
                         if let Some(field_value) = map.get(&Value::String(field.name.clone())) {
                             if let Some(error_msg) = check_type_mismatch_with_enum_validation(
@@ -987,6 +1216,7 @@ fn extract_inner_type(type_str: &str, wrapper: &str) -> Option<String> {
 }
 
 /// Basic RON syntax validation with better error positioning
+#[allow(dead_code)]
 pub fn validate_ron_syntax(content: &str) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
 

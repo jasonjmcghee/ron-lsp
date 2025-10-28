@@ -51,13 +51,29 @@ impl TypeInfo {
     pub fn find_field(&self, field_name: &str) -> Option<&FieldInfo> {
         match &self.kind {
             TypeKind::Struct(fields) => fields.iter().find(|f| f.name == field_name),
-            TypeKind::Enum(_) => None,
+            TypeKind::Enum(variants) => {
+                // Search through all variants' fields
+                variants.iter()
+                    .flat_map(|v| &v.fields)
+                    .find(|f| f.name == field_name)
+            }
         }
     }
 
     pub fn find_variant(&self, variant_name: &str) -> Option<&EnumVariant> {
         match &self.kind {
             TypeKind::Enum(variants) => variants.iter().find(|v| v.name == variant_name),
+            TypeKind::Struct(_) => None,
+        }
+    }
+
+    pub fn variant_fields(&self, variant_name: &str) -> Option<&Vec<FieldInfo>> {
+        match &self.kind {
+            TypeKind::Enum(variants) => {
+                variants.iter()
+                    .find(|v| v.name == variant_name)
+                    .map(|v| &v.fields)
+            }
             TypeKind::Struct(_) => None,
         }
     }
@@ -437,8 +453,12 @@ impl RustAnalyzer {
 
             // If not found by exact match, try finding by simple name
             // e.g., "PostType" should match "crate::models::PostType"
+            // After resolving alias, also try simple name match for resolved_type
             for (key, value) in cache.iter() {
-                if key.ends_with(&format!("::{}", type_path)) || key == type_path {
+                if key.ends_with(&format!("::{}", type_path))
+                    || key.ends_with(&format!("::{}", resolved_type))
+                    || key == type_path
+                    || key == &resolved_type {
                     return Some(value.clone());
                 }
             }
