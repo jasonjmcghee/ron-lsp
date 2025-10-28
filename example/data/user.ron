@@ -1,11 +1,15 @@
 /* @[crate::models::User] */
-
 User(
     id: 1,
     name: "Alice Johnson",
     email: "alice@example.com",
     age: 28,
-    bio: Some("Full-stack developer passionate about Rust and web technologies."),
+    bio: Some(
+        "Full-stack developer passionate about Rust and web technologies.",
+    ),
     is_active: true,
-    roles: ["admin", "developer"],
+    roles: [
+        "admin",
+        "developer",
+    ],
 )

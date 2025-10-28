@@ -1,4 +1,5 @@
 /* @[crate::models::Status] */
-
 // Tuple variant with error code
-Error(404)
+Error(
+    404,
+)

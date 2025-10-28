@@ -3,6 +3,7 @@ mod code_actions;
 mod completion;
 mod diagnostic_reporter;
 mod diagnostics;
+mod format;
 mod ron_parser;
 mod rust_analyzer;
 
@@ -633,46 +634,7 @@ fn get_word_at_position(content: &str, position: Position) -> Option<String> {
 
 impl Backend {
     fn format_ron(content: &str) -> String {
-        use ron::ser::{to_string_pretty, PrettyConfig};
-
-        // Check if content starts with a type annotation comment
-        let has_annotation = content.trim_start().starts_with("/*");
-        let (annotation, ron_content) = if has_annotation {
-            // Find the end of the annotation comment
-            if let Some(end_idx) = content.find("*/") {
-                let annotation = &content[..end_idx + 2];
-                let rest = &content[end_idx + 2..];
-                (Some(annotation), rest)
-            } else {
-                (None, content)
-            }
-        } else {
-            (None, content)
-        };
-
-        // Try to parse and reformat the RON content
-        let formatted_ron = match ron::from_str::<ron::Value>(ron_content.trim()) {
-            Ok(value) => {
-                let config = PrettyConfig::new()
-                    .depth_limit(100)
-                    .separate_tuple_members(true)
-                    .enumerate_arrays(false)
-                    .compact_arrays(false);
-
-                to_string_pretty(&value, config).unwrap_or_else(|_| ron_content.to_string())
-            }
-            Err(_) => {
-                // If parsing fails, just return original content
-                ron_content.to_string()
-            }
-        };
-
-        // Reconstruct with annotation if present
-        if let Some(ann) = annotation {
-            format!("{}\n\n{}", ann.trim(), formatted_ron)
-        } else {
-            formatted_ron
-        }
+        format::format_ron(content)
     }
 
     async fn publish_diagnostics(&self, uri: &str, content: &str, type_annotation: Option<&str>) {
@@ -737,6 +699,174 @@ impl Backend {
         self.client
             .publish_diagnostics(uri.parse().unwrap(), diagnostics, None)
             .await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_format_ron_named_struct() {
+        let input = r#"User(
+    id: 1,
+    name: "Alice",
+    age: 28
+)"#;
+        let formatted = Backend::format_ron(input);
+
+        // Should be able to parse the result
+        let parsed = ron::from_str::<ron::Value>(&formatted);
+        assert!(parsed.is_ok(), "Formatted RON should be parseable. Got: {}", formatted);
+
+        // Original should also be parseable
+        let original_parsed: ron::Value = ron::from_str(input).expect("Original should parse");
+        let formatted_parsed: ron::Value = ron::from_str(&formatted).expect("Formatted should parse");
+
+        // Both should represent the same value
+        assert_eq!(original_parsed, formatted_parsed, "Formatted RON should preserve value");
+    }
+
+    #[test]
+    fn test_format_ron_with_annotation() {
+        let input = r#"/* @[crate::models::User] */
+
+User(
+    id: 1,
+    name: "Alice"
+)"#;
+        let formatted = Backend::format_ron(input);
+
+        // Should preserve annotation
+        assert!(formatted.contains("/* @[crate::models::User] */"),
+                "Should preserve type annotation. Got: {}", formatted);
+
+        // Extract RON part (after annotation)
+        let ron_part = formatted.split("*/").nth(1).unwrap().trim();
+
+        // Should be parseable
+        let parsed = ron::from_str::<ron::Value>(ron_part);
+        assert!(parsed.is_ok(),
+                "Formatted RON (without annotation) should be parseable. Got: {}\nError: {:?}",
+                ron_part, parsed.as_ref().err());
+    }
+
+    #[test]
+    fn test_format_ron_unnamed_struct() {
+        let input = r#"(
+    id: 1,
+    name: "Alice",
+    roles: ["admin", "user"]
+)"#;
+        let formatted = Backend::format_ron(input);
+
+        // Should be able to parse both
+        let original_parsed: ron::Value = ron::from_str(input).expect("Original should parse");
+        let formatted_parsed = ron::from_str::<ron::Value>(&formatted);
+
+        assert!(formatted_parsed.is_ok(),
+                "Formatted RON should be parseable.\nInput:\n{}\n\nFormatted:\n{}\n\nError: {:?}",
+                input, formatted, formatted_parsed.as_ref().err());
+
+        let formatted_parsed = formatted_parsed.unwrap();
+        assert_eq!(original_parsed, formatted_parsed,
+                   "Formatted RON should preserve value.\nOriginal: {:?}\nFormatted: {:?}",
+                   original_parsed, formatted_parsed);
+    }
+
+    #[test]
+    fn test_format_ron_real_example() {
+        // This is actual RON syntax from user.ron
+        let input = r#"/* @[crate::models::User] */
+
+User(
+    id: 1,
+    name: "Alice Johnson",
+    email: "alice@example.com",
+    age: 28,
+    bio: Some("Full-stack developer passionate about Rust and web technologies."),
+    is_active: true,
+    roles: ["admin", "developer"],
+)"#;
+
+        let formatted = Backend::format_ron(input);
+
+        // Should preserve annotation
+        assert!(formatted.contains("/* @[crate::models::User] */"),
+                "Should preserve type annotation");
+
+        // Extract RON part (after annotation)
+        let ron_part = formatted.split("*/").nth(1).unwrap().trim();
+        let original_ron_part = input.split("*/").nth(1).unwrap().trim();
+
+        // Both should parse
+        let original_parsed: ron::Value = ron::from_str(original_ron_part)
+            .expect("Original should parse");
+        let formatted_parsed = ron::from_str::<ron::Value>(ron_part);
+
+        assert!(formatted_parsed.is_ok(),
+                "Formatted RON should be parseable.\n\nOriginal RON:\n{}\n\nFormatted RON:\n{}\n\nError: {:?}",
+                original_ron_part, ron_part, formatted_parsed.as_ref().err());
+
+        let formatted_parsed = formatted_parsed.unwrap();
+        assert_eq!(original_parsed, formatted_parsed,
+                   "Formatted RON should preserve value.\nOriginal: {:?}\nFormatted: {:?}",
+                   original_parsed, formatted_parsed);
+    }
+
+    #[test]
+    fn test_format_ron_outputs_valid_ron() {
+        // Test with the actual mixed_syntax.ron content
+        let input = r#"/* @[crate::models::Post] */
+
+// This demonstrates mixing explicit and unnamed struct syntax
+// throughout the document
+
+Post(
+    id: 123,
+    title: "Mixed Syntax Example",
+    content: "Demonstrating both explicit and unnamed struct syntax",
+
+    // Explicit type name for author
+    author: (
+        id: 5,
+        name: "Charlie",
+        email: "charlie@example.com",
+        age: 28,
+        bio: None,
+        is_active: true,
+        roles: ["editor"],
+    ),
+
+    likes: 50,
+    tags: ["example", "syntax"],
+    published: true,
+    post_type: Short,
+)"#;
+
+        let formatted = Backend::format_ron(input);
+
+        println!("===== FORMATTED OUTPUT =====");
+        println!("{}", formatted);
+        println!("===== END =====");
+
+        // Extract RON part
+        let ron_part = if formatted.contains("*/") {
+            formatted.split("*/").nth(1).unwrap().trim()
+        } else {
+            formatted.trim()
+        };
+
+        // The formatted output MUST be valid RON
+        let parse_result = ron::from_str::<ron::Value>(ron_part);
+        assert!(parse_result.is_ok(),
+                "Formatted output must be valid RON.\n\nFormatted:\n{}\n\nError: {:?}",
+                ron_part, parse_result.err());
+
+        // And it should NOT look like JSON (no leading braces for maps)
+        assert!(!ron_part.trim().starts_with('{'),
+                "Formatted RON should not start with '{{' (that's JSON syntax). Got:\n{}",
+                ron_part);
     }
 }
 
