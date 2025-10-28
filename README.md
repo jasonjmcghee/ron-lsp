@@ -18,7 +18,9 @@ Install:
 cargo install ron-lsp
 ```
 
-A quick test using the cli (from a rust project working directory):
+Add comment annotations to the top of `.ron` files like `/* @[crate::models::User] */`.
+
+And then use the cli (from a rust project working directory):
 
 ```bash
 ron-lsp check
@@ -27,6 +29,10 @@ ron-lsp check
 It'll output something like this if there are warnings / errors:
 
 <img width="503" height="488" alt="Screenshot 2025-10-24 at 10 02 35 AM" src="https://github.com/user-attachments/assets/7914fef5-8fff-4216-bc75-e7437ee5c333" />
+
+You can optionally pass a file or folder. (e.g. `ron-lsp check crates/sub-crate` - it will recursively check all `.ron` files from that point.)
+
+It will use the nearest `Cargo.toml` starting from the resolved `.ron` file.
 
 ## Usage
 
@@ -105,20 +111,6 @@ Config(
 ```
 
 <img width="707" height="436" alt="Screenshot 2025-10-24 at 5 52 13 PM" src="https://github.com/user-attachments/assets/f638947d-0408-4a7d-a209-de8e5d56c15d" />
-
-## CLI
-
-Use via `ron-lsp check`
-
-You can optionally pass a file or folder. (e.g. `ron-lsp check crates/sub-crate` - it will recursively check all `.ron` files from that point.)
-
-It will use the nearest Cargo.toml starting from the resolved `.ron` file.
-
-```bash
-./target/release/ron-lsp check
-```
-
-<img width="503" height="488" alt="Screenshot 2025-10-24 at 10 02 35 AM" src="https://github.com/user-attachments/assets/7914fef5-8fff-4216-bc75-e7437ee5c333" />
 
 ## Editor Integration
 
