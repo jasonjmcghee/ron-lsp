@@ -6,32 +6,27 @@
 ![JetBrains Plugin Version](https://img.shields.io/jetbrains/plugin/v/28862-ron-lsp)
 
 
-
-An LSP for [RON](https://github.com/ron-rs/ron) files that provides autocomplete, diagnostics, go to definition, code actions, and hover support based on Rust type annotations.
+An LSP for [RON](https://github.com/ron-rs/ron) files that provides autocomplete, diagnostics, go to definition, code actions, and hover support based on Rust type annotations. It can also be used to check in bulk via CLI, optionally with a path. `ron-lsp check [<path>]`
 
 <img width="727" height="214" alt="Screenshot 2025-10-24 at 9 59 22 AM" src="https://github.com/user-attachments/assets/e1c436ff-2f58-474e-b97f-14215107067d" />
 
-It can also be used to check in bulk via CLI, optionally with a path. `ron-lsp check [<path>]`
-
-<img width="503" height="488" alt="Screenshot 2025-10-24 at 10 02 35 AM" src="https://github.com/user-attachments/assets/7914fef5-8fff-4216-bc75-e7437ee5c333" />
-
-## Note
-
-There's a lot of functionality that could be added to improve this, like more code actions, better auto complete, less hacky type detection and resolution... the list goes on.
-
-Feel free to open a PR or an issue.
-
 ## Getting started
 
-Build:
+Install:
 
 ```bash
-cargo build --release
+cargo install ron-lsp
 ```
 
-The binary will be at `target/release/ron-lsp`, move it wherever you like.
+A quick test using the cli (from a rust project working directory):
 
-To minimize configuration, you might want to add it to your PATH.
+```bash
+ron-lsp check
+```
+
+It'll output something like this if there are warnings / errors:
+
+<img width="503" height="488" alt="Screenshot 2025-10-24 at 10 02 35 AM" src="https://github.com/user-attachments/assets/7914fef5-8fff-4216-bc75-e7437ee5c333" />
 
 ## Usage
 
