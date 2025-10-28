@@ -25,7 +25,7 @@ class RonLspServerSupportProvider : LspServerSupportProvider {
         return LspServerWidgetItem(
             lspServer,
             currentFile,
-            RonIcons.FILE,
+            RonIcons.RON,
             RonLspSettingsConfigurable::class.java
         )
     }

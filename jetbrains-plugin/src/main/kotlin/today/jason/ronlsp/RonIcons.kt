@@ -5,5 +5,5 @@ import javax.swing.Icon
 
 object RonIcons {
     @JvmField
-    val FILE: Icon = IconLoader.getIcon("/icons/ron-icon.svg", RonIcons::class.java)
+    val RON: Icon = IconLoader.getIcon("/icons/ron-icon.svg", RonIcons::class.java)
 }

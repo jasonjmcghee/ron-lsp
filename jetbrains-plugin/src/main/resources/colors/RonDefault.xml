@@ -1,0 +1,14 @@
+<?xml version='1.0'?>
+<list>
+    <option name="today.jason.ronlsp.ron.ENUM_VARIANT">
+        <value>
+            <option name="FOREGROUND" value="0E7FC5"/>
+            <option name="FONT_TYPE" value="2"/>
+        </value>
+    </option>
+    <option name="today.jason.ronlsp.ron.TYPE_NAME">
+        <value>
+            <option name="FOREGROUND" value="A04908"/>
+        </value>
+    </option>
+</list>
