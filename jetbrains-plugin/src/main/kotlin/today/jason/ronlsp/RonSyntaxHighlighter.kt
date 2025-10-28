@@ -1,5 +1,6 @@
 package today.jason.ronlsp
 
+import com.intellij.lexer.FlexAdapter
 import com.intellij.lexer.Lexer
 import com.intellij.openapi.editor.DefaultLanguageHighlighterColors
 import com.intellij.openapi.editor.HighlighterColors
@@ -9,7 +10,7 @@ import com.intellij.psi.TokenType
 import com.intellij.psi.tree.IElementType
 
 class RonSyntaxHighlighter : SyntaxHighlighterBase() {
-    override fun getHighlightingLexer(): Lexer = RonLexer()
+    override fun getHighlightingLexer(): Lexer = FlexAdapter(RonLexer(null))
 
     override fun getTokenHighlights(tokenType: IElementType): Array<TextAttributesKey> {
         return when (tokenType) {

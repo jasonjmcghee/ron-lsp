@@ -1,3 +1,6 @@
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+import java.net.URI
+
 plugins {
     id("java")
     id("org.jetbrains.kotlin.jvm") version "2.1.0"
@@ -7,6 +10,12 @@ plugins {
 group = "today.jason"
 version = "0.1.0"
 
+java {
+    toolchain {
+        languageVersion.set(JavaLanguageVersion.of(17))
+    }
+}
+
 repositories {
     mavenCentral()
     intellijPlatform {
@@ -14,11 +23,19 @@ repositories {
     }
 }
 
+configurations {
+    create("jflex")
+}
+
 dependencies {
     intellijPlatform {
         intellijIdeaUltimate("2025.2.4")
         instrumentationTools()
     }
+    implementation("org.jetbrains:annotations:26.0.2")
+
+    // Use JetBrains patched JFlex for IntelliJ compatibility
+    "jflex"("org.jetbrains.intellij.deps.jflex:jflex:1.9.2")
 }
 
 intellijPlatform {
@@ -47,17 +64,63 @@ intellijPlatform {
     }
 }
 
+sourceSets {
+    main {
+        java {
+            srcDirs("src/main/gen")
+        }
+    }
+}
+
 tasks {
     buildSearchableOptions {
         enabled = false
     }
 
+    val generateLexer = register<JavaExec>("generateLexer") {
+        val src = "src/main/grammar/Ron.flex"
+        val dst = "src/main/gen"
+        val skeletonFile = "src/main/grammar/idea-flex.skeleton"
+
+        inputs.file(src)
+        outputs.dir(dst)
+
+        classpath = configurations["jflex"]
+        mainClass.set("jflex.Main")
+        args = listOf(
+            "-d", dst,
+            "--nobak",
+            "--skel", skeletonFile,  // Use IntelliJ skeleton
+            src
+        )
+
+        // Download skeleton file if it doesn't exist
+        doFirst {
+            val skeletonPath = file(skeletonFile)
+            if (!skeletonPath.exists()) {
+                skeletonPath.parentFile.mkdirs()
+                val url = URI("https://raw.githubusercontent.com/JetBrains/intellij-community/master/tools/lexer/idea-flex.skeleton").toURL()
+                url.openStream().use { input: java.io.InputStream ->
+                    skeletonPath.outputStream().use { output: java.io.OutputStream ->
+                        input.copyTo(output)
+                    }
+                }
+                println("Downloaded idea-flex.skeleton")
+            }
+        }
+    }
+
     withType<JavaCompile> {
-        sourceCompatibility = "21"
-        targetCompatibility = "21"
+        sourceCompatibility = "17"
+        targetCompatibility = "17"
+        dependsOn(generateLexer)
     }
 
     withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile> {
-        kotlinOptions.jvmTarget = "21"
+        compilerOptions.jvmTarget.set(JvmTarget.JVM_17)
+    }
+
+    compileKotlin {
+        dependsOn(generateLexer)
     }
 }
