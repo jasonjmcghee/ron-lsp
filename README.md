@@ -139,6 +139,24 @@ Then, either ensure 'ron-lsp' is in your PATH or update `.vscode/settings.json`:
 }
 ```
 
+### Jetbrains
+
+
+Either:
+
+- Grab `.zip` from releases
+
+OR :
+
+```bash
+cd jetbrains-plugin
+./gradlew buildPlugin
+```
+
+And "Install Plugin from Disk" and choose the zip.
+
+Then, either ensure 'ron-lsp' is in your PATH or update "Server path" in `Settings > Tools > RON LSP`.
+
 ### Neovim (with nvim-lspconfig)
 
 Note: If you don't want `ron-lsp` in your path, replace with the absolute path.
@@ -187,4 +205,8 @@ Contributions welcome! This is a foundational implementation that can be extende
 
 ## License
 
-MIT
+MIT (except altered Rust logo svg, see below)
+
+## Attribution
+
+The logo used in the Jetbrains plugin is a colorized version of the Rust logo which is [CC-BY 4.0](https://creativecommons.org/licenses/by/4.0/). See Rust logo [specific trademark policy](https://rustfoundation.org/policy/rust-trademark-policy/#art) for additional details.

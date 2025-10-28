@@ -2,8 +2,9 @@
 Settings(
     // This Settings struct does NOT have #[derive(Default)]
     // So the LSP will show warnings for missing required fields
-    // Try using the code action "Add all required fields" to fill them in!
+    // Try using the code action "Add 2 required fields" to fill them in!
     app_name: "My App",
-    // Missing: version, features
-    // The LSP should show: "Missing fields: version, features"
+    // Required: version, features
+    // The LSP should show: "2 Required fields: version, features"
+    // Note: description in `Option` so it's optional.
 )
