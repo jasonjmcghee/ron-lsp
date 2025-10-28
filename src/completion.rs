@@ -1,4 +1,4 @@
-use crate::ron_parser;
+use crate::tree_sitter_parser;
 use crate::rust_analyzer::{RustAnalyzer, TypeInfo, TypeKind};
 use std::sync::Arc;
 use tower_lsp::lsp_types::{
@@ -13,34 +13,41 @@ enum CompletionContext {
     StructType, // Completing struct type name for nested types
 }
 
-/// Determine what we're completing based on cursor position
+/// Determine what we're completing based on cursor position using tree-sitter
 fn get_completion_context(content: &str, position: Position) -> CompletionContext {
-    let lines: Vec<&str> = content.lines().collect();
+    use crate::ts_utils::{self, RonParser};
 
-    if position.line as usize >= lines.len() {
-        return CompletionContext::FieldName;
-    }
+    let mut parser = RonParser::new();
+    let tree = match parser.parse(content) {
+        Some(t) => t,
+        None => return CompletionContext::FieldName,
+    };
 
-    let line = lines[position.line as usize];
-    let col = position.character as usize;
-    let before_cursor = &line[..col.min(line.len())];
+    let node = match ts_utils::node_at_position(&tree, content, position) {
+        Some(n) => n,
+        None => return CompletionContext::FieldName,
+    };
 
-    // Check if we're after a colon (completing a value)
-    if let Some(last_colon) = before_cursor.rfind(':') {
-        // Make sure there's no comma after the colon (which would mean we're on a new field)
-        let after_colon = &before_cursor[last_colon + 1..];
-        if !after_colon.contains(',') && !after_colon.trim().is_empty() {
-            // If there's already some text after the colon, might be completing a type
-            let trimmed = after_colon.trim();
-            if trimmed
-                .chars()
-                .all(|c| c.is_alphanumeric() || c == '_' || c == ':')
-                && !trimmed.is_empty()
-            {
-                return CompletionContext::StructType;
+    // Check if we're inside a field node
+    if let Some(field_node) = ts_utils::find_ancestor_by_kind(node, "field") {
+        // Check if we're after the colon (in the value position)
+        let field_name_node = field_node.child(0);
+        if let (Some(field_name), Some(value_node)) = (field_name_node, ts_utils::field_value(&field_node)) {
+            // If cursor is after the field name, we're completing a value
+            let name_end = field_name.end_position();
+            if position.line > name_end.row as u32 ||
+               (position.line == name_end.row as u32 && position.character > name_end.column as u32) {
+
+                // Check if there's already some text (might be completing a type)
+                if let Some(val_text) = ts_utils::node_text(&value_node, content) {
+                    if val_text.chars().all(|c| c.is_alphanumeric() || c == '_' || c == ':') {
+                        return CompletionContext::StructType;
+                    }
+                }
+
+                return CompletionContext::FieldValue;
             }
         }
-        return CompletionContext::FieldValue;
     }
 
     // Default to field name completion
@@ -133,7 +140,7 @@ fn generate_field_completions(content: &str, position: Position, type_info: &Typ
     match &type_info.kind {
         TypeKind::Struct(fields) => {
             // Get fields already used in the RON file
-            let used_fields = ron_parser::extract_fields_from_ron(content);
+            let used_fields = tree_sitter_parser::extract_fields_from_ron(content);
 
             // Generate completions for unused fields
             fields
@@ -168,10 +175,10 @@ fn generate_field_completions(content: &str, position: Position, type_info: &Typ
         }
         TypeKind::Enum(variants) => {
             // Check if we're inside a specific variant's fields
-            if let Some(variant_name) = ron_parser::find_current_variant_context(content, position) {
+            if let Some(variant_name) = tree_sitter_parser::find_current_variant_context(content, position) {
                 if let Some(variant) = variants.iter().find(|v| v.name == variant_name) {
                     // Complete the variant's fields
-                    let used_fields = ron_parser::extract_fields_from_ron(content);
+                    let used_fields = tree_sitter_parser::extract_fields_from_ron(content);
                     return variant.fields
                         .iter()
                         .filter(|field| !used_fields.contains(&field.name))
@@ -249,31 +256,9 @@ fn generate_field_completions(content: &str, position: Position, type_info: &Typ
     }
 }
 
-/// Find the field name for the current cursor position
+/// Find the field name for the current cursor position using tree-sitter
 fn find_current_field(content: &str, position: Position) -> Option<String> {
-    let lines: Vec<&str> = content.lines().collect();
-
-    if position.line as usize >= lines.len() {
-        return None;
-    }
-
-    let line = lines[position.line as usize];
-    let col = position.character as usize;
-    let before_cursor = &line[..col.min(line.len())];
-
-    // Find the last colon before cursor
-    if let Some(colon_pos) = before_cursor.rfind(':') {
-        let before_colon = &before_cursor[..colon_pos].trim();
-
-        // Extract field name
-        if let Some(word_start) = before_colon.rfind(|c: char| !c.is_alphanumeric() && c != '_') {
-            return Some(before_colon[word_start + 1..].to_string());
-        } else {
-            return Some(before_colon.to_string());
-        }
-    }
-
-    None
+    tree_sitter_parser::get_field_at_position(content, position)
 }
 
 /// Generate value completions for a specific field

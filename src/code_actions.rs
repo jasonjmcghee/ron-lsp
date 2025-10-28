@@ -1,4 +1,4 @@
-use crate::ron_parser;
+use crate::tree_sitter_parser;
 use crate::rust_analyzer::{FieldInfo, RustAnalyzer, TypeInfo, TypeKind};
 use std::sync::Arc;
 use tower_lsp::lsp_types::*;
@@ -48,7 +48,7 @@ async fn generate_missing_variant_field_actions(
     client: &Client,
 ) -> Vec<CodeActionOrCommand> {
     let mut actions = Vec::new();
-    let variant_locations = ron_parser::find_all_variant_field_locations(content);
+    let variant_locations = tree_sitter_parser::find_all_variant_field_locations(content);
 
     client.log_message(MessageType::INFO, format!("DEBUG code_actions: Found {} variant locations for type {}", variant_locations.len(), type_info.name)).await;
     for loc in &variant_locations {
@@ -205,7 +205,7 @@ fn generate_missing_field_actions(
         if let Some(variant_name) = detect_current_variant_in_content(content) {
             if let Some(variant) = variants.iter().find(|v| v.name == variant_name) {
                 // Generate actions for this variant's fields
-                let ron_fields = ron_parser::extract_fields_from_ron(content);
+                let ron_fields = tree_sitter_parser::extract_fields_from_ron(content);
                 let all_missing: Vec<_> = variant.fields
                     .iter()
                     .filter(|field| !ron_fields.contains(&field.name))
@@ -275,7 +275,7 @@ fn generate_missing_field_actions(
     }
 
     // Original struct logic
-    let ron_fields = ron_parser::extract_fields_from_ron(content);
+    let ron_fields = tree_sitter_parser::extract_fields_from_ron(content);
 
     // Find missing fields
     let all_missing: Vec<_> = fields
@@ -343,172 +343,166 @@ fn generate_missing_field_actions(
     actions
 }
 
-/// Create action to make root-level struct name explicit
+/// Create action to make root-level struct name explicit using tree-sitter
 /// Converts: `(field: value)` → `StructName(field: value)`
 fn create_explicit_root_type_action(
     content: &str,
     type_info: &TypeInfo,
     uri: &str,
 ) -> Option<CodeActionOrCommand> {
-    // Check if content starts with unnamed struct syntax
-    for (line_num, line) in content.lines().enumerate() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with("//") || trimmed.starts_with("/*") {
-            continue;
-        }
+    use crate::ts_utils::{self, RonParser};
 
-        // If it starts with '(' without a type name, offer to add one
-        if trimmed.starts_with('(') {
-            let type_name = type_info
-                .name
-                .split("::")
-                .last()
-                .unwrap_or(&type_info.name);
+    let mut parser = RonParser::new();
+    let tree = parser.parse(content)?;
+    let main_value = ts_utils::find_main_value(&tree)?;
 
-            // Find the position of '(' in the original line (accounting for leading whitespace)
-            let leading_whitespace = line.len() - line.trim_start().len();
-            let paren_pos = leading_whitespace;
+    if main_value.kind() == "struct" && ts_utils::struct_name(&main_value, content).is_none() {
+        let type_name = type_info.name.split("::").last().unwrap_or(&type_info.name);
+        let pos = main_value.start_position();
 
-            let mut changes = std::collections::HashMap::new();
-            changes.insert(
-                tower_lsp::lsp_types::Url::parse(uri).unwrap(),
-                vec![TextEdit {
-                    range: Range::new(
-                        Position::new(line_num as u32, paren_pos as u32),
-                        Position::new(line_num as u32, paren_pos as u32),
-                    ),
-                    new_text: type_name.to_string(),
-                }],
-            );
+        let mut changes = std::collections::HashMap::new();
+        changes.insert(
+            tower_lsp::lsp_types::Url::parse(uri).unwrap(),
+            vec![TextEdit {
+                range: Range::new(
+                    Position::new(pos.row as u32, pos.column as u32),
+                    Position::new(pos.row as u32, pos.column as u32),
+                ),
+                new_text: type_name.to_string(),
+            }],
+        );
 
-            return Some(CodeActionOrCommand::CodeAction(CodeAction {
-                title: format!("Make struct name explicit: {}", type_name),
-                kind: Some(CodeActionKind::REFACTOR),
-                edit: Some(WorkspaceEdit {
-                    changes: Some(changes),
-                    ..Default::default()
-                }),
+        return Some(CodeActionOrCommand::CodeAction(CodeAction {
+            title: format!("Make struct name explicit: {}", type_name),
+            kind: Some(CodeActionKind::REFACTOR),
+            edit: Some(WorkspaceEdit {
+                changes: Some(changes),
                 ..Default::default()
-            }));
-        }
-
-        break; // Only check first non-comment line
+            }),
+            ..Default::default()
+        }));
     }
 
     None
 }
 
-/// Create action to make nested field type explicit
+/// Create action to make nested field type explicit using tree-sitter
 /// Converts: `foo: (value)` → `foo: TypeName(value)`
 fn create_explicit_field_type_action(
     content: &str,
     field: &FieldInfo,
     uri: &str,
 ) -> Option<CodeActionOrCommand> {
-    // Find the field in the content
-    let field_pattern = format!("{}:", field.name);
-    let field_pos = content.find(&field_pattern)?;
+    use crate::ts_utils::{self, RonParser};
 
-    // Find where the value starts (after colon)
-    let after_field = &content[field_pos + field_pattern.len()..];
-    let value_start_in_after = after_field.len() - after_field.trim_start().len();
-    let value_str = after_field[value_start_in_after..].trim_start();
+    let mut parser = RonParser::new();
+    let tree = parser.parse(content)?;
+    let main_value = ts_utils::find_main_value(&tree)?;
 
-    // Check if the value starts with '(' (unnamed struct/tuple)
-    if value_str.starts_with('(') {
-        // Check if it's already explicitly typed by looking for TypeName(
-        // We need to check if there's a type name before the paren
-        let before_paren = &after_field[value_start_in_after..]
-            .split('(')
-            .next()
-            .unwrap_or("");
+    if main_value.kind() == "struct" {
+        let field_nodes = ts_utils::struct_fields(&main_value);
 
-        if before_paren.trim().is_empty() {
-            // It's unnamed! Offer to add the type name
-            let type_name = field
-                .type_name
-                .split("::")
-                .last()
-                .unwrap_or(&field.type_name)
-                .replace(" ", "");
+        for field_node in field_nodes {
+            if let Some(field_name) = ts_utils::field_name(&field_node, content) {
+                if field_name == field.name {
+                    if let Some(value_node) = ts_utils::field_value(&field_node) {
+                        if value_node.kind() == "struct" && ts_utils::struct_name(&value_node, content).is_none() {
+                            let type_name = field.type_name.split("::").last().unwrap_or(&field.type_name).replace(" ", "");
+                            let clean_type = if type_name.starts_with("Option<") && type_name.ends_with('>') {
+                                &type_name[7..type_name.len() - 1]
+                            } else {
+                                &type_name
+                            };
 
-            // Strip Option< > and other wrappers
-            let clean_type = if type_name.starts_with("Option<") && type_name.ends_with('>') {
-                &type_name[7..type_name.len() - 1]
-            } else {
-                &type_name
-            };
+                            let pos = value_node.start_position();
+                            let mut changes = std::collections::HashMap::new();
+                            changes.insert(
+                                tower_lsp::lsp_types::Url::parse(uri).unwrap(),
+                                vec![TextEdit {
+                                    range: Range::new(
+                                        Position::new(pos.row as u32, pos.column as u32),
+                                        Position::new(pos.row as u32, pos.column as u32),
+                                    ),
+                                    new_text: clean_type.to_string(),
+                                }],
+                            );
 
-            // Calculate the byte offset of the opening paren in the entire content
-            let paren_offset = field_pos + field_pattern.len() + value_start_in_after;
-
-            // Convert byte offset to line/column position
-            let before_paren_content = &content[..paren_offset];
-            // Count newlines to get 0-indexed line number
-            let paren_line_num = before_paren_content.matches('\n').count();
-            let line_start_offset = before_paren_content.rfind('\n').map(|pos| pos + 1).unwrap_or(0);
-            let paren_col = paren_offset - line_start_offset;
-
-            let mut changes = std::collections::HashMap::new();
-            changes.insert(
-                tower_lsp::lsp_types::Url::parse(uri).unwrap(),
-                vec![TextEdit {
-                    range: Range::new(
-                        Position::new(paren_line_num as u32, paren_col as u32),
-                        Position::new(paren_line_num as u32, paren_col as u32),
-                    ),
-                    new_text: clean_type.to_string(),
-                }],
-            );
-
-            return Some(CodeActionOrCommand::CodeAction(CodeAction {
-                title: format!("Make field type explicit: {} {}", field.name, clean_type),
-                kind: Some(CodeActionKind::REFACTOR),
-                edit: Some(WorkspaceEdit {
-                    changes: Some(changes),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            }));
+                            return Some(CodeActionOrCommand::CodeAction(CodeAction {
+                                title: format!("Make field type explicit: {} {}", field.name, clean_type),
+                                kind: Some(CodeActionKind::REFACTOR),
+                                edit: Some(WorkspaceEdit {
+                                    changes: Some(changes),
+                                    ..Default::default()
+                                }),
+                                ..Default::default()
+                            }));
+                        }
+                    }
+                }
+            }
         }
     }
 
     None
 }
 
-/// Generate text edits to insert missing fields
+/// Generate text edits to insert missing fields using tree-sitter
 fn generate_field_insertions(missing_fields: &[&FieldInfo], content: &str) -> Option<TextEdit> {
-    // Find the insertion point - right before the closing parenthesis
-    let lines: Vec<&str> = content.lines().collect();
+    use crate::ts_utils::{self, RonParser};
 
-    // Find the last line with content (before the closing paren)
-    let mut insert_line = 0;
-    let mut insert_col = 0;
-    let mut found_opening = false;
+    let mut parser = RonParser::new();
+    let tree = parser.parse(content)?;
+    let root = tree.root_node();
 
-    for (line_num, line) in lines.iter().enumerate() {
-        if line.contains('(') {
-            found_opening = true;
+    // Try to find struct node even if there's an ERROR (for :: syntax)
+    let main_value = match ts_utils::find_main_value(&tree) {
+        Some(v) => {
+            v
         }
-        if found_opening && line.contains(')') {
-            insert_line = line_num;
-            // Find the position of the closing paren
-            insert_col = line.find(')').unwrap_or(0);
-            break;
+        None => {
+            // Fallback: look for any struct node if main value is ERROR
+            let mut cursor = root.walk();
+            let result = root.children(&mut cursor).find(|n| n.kind() == "struct");
+            match result {
+                Some(s) => {
+                    s
+                }
+                None => {
+                    return None;
+                }
+            }
         }
-    }
+    };
 
-    if !found_opening {
+    if main_value.kind() != "struct" && main_value.kind() != "ERROR" {
         return None;
     }
 
-    // Check if we need to add a comma before our new fields
-    let needs_comma = if insert_line > 0 {
-        let prev_line = lines[insert_line.saturating_sub(1)].trim();
-        !prev_line.is_empty() && !prev_line.ends_with(',') && !prev_line.ends_with('(')
+    // For ERROR nodes, the struct is likely a SIBLING, not a child
+    let struct_node = if main_value.kind() == "ERROR" {
+        // Look for struct node among root's children
+        let mut cursor = root.walk();
+        let result = root.children(&mut cursor).find(|n| n.kind() == "struct");
+        match result {
+            Some(s) => {
+                s
+            }
+            None => {
+                return None;
+            }
+        }
     } else {
-        false
+        main_value
     };
+
+    // Find the closing paren position
+    let end_pos = struct_node.end_position();
+    let insert_line = end_pos.row as u32;
+    let insert_col = end_pos.column.saturating_sub(1) as u32; // Before the closing paren
+
+    // Check if we have existing fields to determine if we need a comma
+    let existing_fields = ts_utils::struct_fields(&struct_node);
+    let needs_comma = !existing_fields.is_empty();
 
     // Generate the field text
     let mut field_text = String::new();
@@ -518,16 +512,8 @@ fn generate_field_insertions(missing_fields: &[&FieldInfo], content: &str) -> Op
         field_text.push('\n');
     }
 
-    // Detect indentation from existing content
-    let indent = if let Some(line_with_field) = lines
-        .iter()
-        .find(|l| l.contains(':') && !l.trim().starts_with("/*"))
-    {
-        let trimmed = line_with_field.trim_start();
-        &line_with_field[..line_with_field.len() - trimmed.len()]
-    } else {
-        "    " // default to 4 spaces
-    };
+    // Use default 4-space indentation
+    let indent = "    ";
 
     for (i, field) in missing_fields.iter().enumerate() {
         field_text.push_str(indent);
@@ -550,13 +536,17 @@ fn generate_field_insertions(missing_fields: &[&FieldInfo], content: &str) -> Op
 }
 
 /// Detect which enum variant we're currently inside based on the content
-/// This scans for patterns like EnumName::VariantName( or EnumName::VariantName {
+/// This primarily looks for EnumName::VariantName( pattern
+/// Returns None for regular structs without :: prefix
 fn detect_current_variant_in_content(content: &str) -> Option<String> {
-    // Look for pattern: EnumName::VariantName( or EnumName::VariantName {
-    // RON uses parentheses for struct variants
+    // First try regex for :: syntax (which indicates it's definitely a variant)
     let re = regex::Regex::new(r"\w+::(\w+)\s*[\(\{]").ok()?;
-    let caps = re.captures(content)?;
-    Some(caps.get(1)?.as_str().to_string())
+    if let Some(caps) = re.captures(content) {
+        return Some(caps.get(1)?.as_str().to_string());
+    }
+
+    // If no :: found, don't assume it's a variant (could be a regular struct)
+    None
 }
 
 /// Generate a default value for a given Rust type
@@ -899,6 +889,7 @@ mod tests {
     fn test_detect_current_variant_in_content() {
         let content = "MyEnum::StructVariant(\n    field_a: value\n)";
         let variant = detect_current_variant_in_content(content);
+        println!("Detected variant: {:?}", variant);
         assert_eq!(variant, Some("StructVariant".to_string()));
     }
 
@@ -906,6 +897,7 @@ mod tests {
     fn test_detect_current_variant_in_content_no_match() {
         let content = "MyStruct(\n    field_a: value\n)";
         let variant = detect_current_variant_in_content(content);
+        println!("Detected variant (should be None): {:?}", variant);
         assert!(variant.is_none());
     }
 }

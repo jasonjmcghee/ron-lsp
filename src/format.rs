@@ -1,249 +1,310 @@
-/// Simple RON formatter that handles:
-/// - Indentation based on (), [], {} nesting
-/// - Whitespace normalization
-/// - Comma placement
-/// - Preserves comments
-/// - Always multi-line for non-empty structures
+/// Tree-sitter based RON formatter
+/// This formatter uses the AST to properly handle formatting
+
+use crate::{annotation_parser, ts_utils::{self, RonParser}};
+use tree_sitter::Node;
+
+/// Format RON content using tree-sitter AST
 pub fn format_ron(content: &str) -> String {
-    // Extract type annotation if present
-    let has_annotation = content.trim_start().starts_with("/*");
-    let (annotation, ron_content) = if has_annotation {
+    let indent_str = "    "; // 4 spaces
+
+    // Build the formatted output
+    let mut result = String::new();
+
+    // Check for type annotation using the existing parser
+    // (tree-sitter grammar has issues with /* @[...] */ vs block comments)
+    if let Some(annotation) = annotation_parser::parse_type_annotation(content) {
+        result.push_str("/* @[");
+        result.push_str(&annotation);
+        result.push_str("] */\n\n");
+    }
+
+    // Parse the RON content (without annotation) for formatting
+    let ron_content = if content.trim_start().starts_with("/*") {
+        // Skip past the type annotation
         if let Some(end_idx) = content.find("*/") {
-            let annotation = &content[..end_idx + 2];
-            let rest = &content[end_idx + 2..];
-            (Some(annotation.trim()), rest)
+            &content[end_idx + 2..]
         } else {
-            (None, content)
+            content
         }
     } else {
-        (None, content)
+        content
     };
 
-    let mut result = String::new();
-    let mut indent_level = 0;
-    let indent_str = "    "; // 4 spaces
-    let mut chars = ron_content.chars().peekable();
-    let mut in_string = false;
-    let mut escape_next = false;
-    let mut in_comment = false;
-    let mut current_line = String::new();
-    let mut at_line_start = true;
-    let mut bracket_depth: usize = 0; // Track nesting depth to know if we're in multi-line mode
+    let mut parser = RonParser::new();
+    let tree = match parser.parse(ron_content) {
+        Some(t) => t,
+        None => {
+            // If parsing fails, return original content
+            return content.to_string();
+        }
+    };
 
-    while let Some(ch) = chars.next() {
-        // Handle line comments
-        if !in_string && ch == '/' && chars.peek() == Some(&'/') {
-            if !current_line.trim().is_empty() {
-                result.push_str(&indent_str.repeat(indent_level));
-                result.push_str(current_line.trim());
-                result.push('\n');
-                current_line.clear();
+    // Format the main value
+    if let Some(main_value) = ts_utils::find_main_value(&tree) {
+        format_node(&main_value, ron_content, &mut result, 0, indent_str, false);
+    }
+
+    result.trim_end().to_string()
+}
+
+/// Format a single node recursively
+fn format_node(
+    node: &Node,
+    content: &str,
+    output: &mut String,
+    indent_level: usize,
+    indent_str: &str,
+    inline: bool,
+) {
+    let kind = node.kind();
+
+    match kind {
+        "struct" => format_struct(node, content, output, indent_level, indent_str, inline),
+        "array" => format_array(node, content, output, indent_level, indent_str, inline),
+        "map" => format_map(node, content, output, indent_level, indent_str, inline),
+        "tuple" => format_tuple(node, content, output, indent_level, indent_str, inline),
+        "field" => format_field(node, content, output, indent_level, indent_str),
+        "string" | "integer" | "float" | "boolean" | "char" | "identifier" | "unit" => {
+            // Leaf nodes - just output their text
+            if let Some(text) = ts_utils::node_text(node, content) {
+                output.push_str(text);
             }
-
-            // Add blank line before comment if it's on its own line
-            // (at_line_start means we haven't accumulated content on this line yet)
-            // But don't add if it's right after an opening bracket (first field)
-            // or if the previous line was already a comment
-            let prev_line_was_comment = result
-                .trim_end()
-                .lines()
-                .last()
-                .map(|line| line.trim_start().starts_with("//"))
-                .unwrap_or(false);
-
-            if at_line_start
-                && !result.is_empty()
-                && !result.ends_with("\n\n")
-                && !result.ends_with("(\n")
-                && !result.ends_with("[\n")
-                && !result.ends_with("{\n")
-                && !prev_line_was_comment
-            {
-                result.push('\n');
+        }
+        _ => {
+            // For other nodes, just output their text as-is
+            if let Some(text) = ts_utils::node_text(node, content) {
+                output.push_str(text);
             }
+        }
+    }
+}
 
-            current_line.push(ch);
-            in_comment = true;
-            continue;
+/// Format a struct node
+fn format_struct(
+    node: &Node,
+    content: &str,
+    output: &mut String,
+    indent_level: usize,
+    indent_str: &str,
+    _inline: bool,
+) {
+    // Get struct name if it exists
+    if let Some(name) = ts_utils::struct_name(node, content) {
+        output.push_str(name);
+    }
+
+    // Check if empty
+    let is_empty = ts_utils::is_empty_structure(node, content);
+
+    if is_empty {
+        output.push_str("()");
+        return;
+    }
+
+    output.push('(');
+
+    // Get all fields and values to determine if this is a tuple-style or field-style struct
+    let fields = ts_utils::struct_fields(node);
+    let values = ts_utils::struct_values(node, content);
+
+    // If we have fields, use field formatting
+    if !fields.is_empty() {
+        output.push('\n');
+
+        for (i, field) in fields.iter().enumerate() {
+            output.push_str(&indent_str.repeat(indent_level + 1));
+            format_field(field, content, output, indent_level + 1, indent_str);
+
+            // Add comma after each field
+            if i < fields.len() - 1 {
+                output.push(',');
+            } else {
+                // Optional trailing comma on last field
+                output.push(',');
+            }
+            output.push('\n');
         }
 
-        if in_comment {
-            current_line.push(ch);
-            if ch == '\n' {
-                result.push_str(&indent_str.repeat(indent_level));
-                result.push_str(current_line.trim());
-                result.push('\n');
-                current_line.clear();
-                in_comment = false;
-                at_line_start = true;
-            }
-            continue;
+        output.push_str(&indent_str.repeat(indent_level));
+    } else if !values.is_empty() {
+        // Tuple-style struct like Some("value") - these should stay inline if single element
+        let should_inline = values.len() == 1;
+
+        if !should_inline {
+            output.push('\n');
         }
 
-        // Handle strings
-        if in_string {
-            current_line.push(ch);
-            if escape_next {
-                escape_next = false;
-            } else if ch == '\\' {
-                escape_next = true;
-            } else if ch == '"' {
-                in_string = false;
+        for (i, child) in values.iter().enumerate() {
+            if !should_inline {
+                output.push_str(&indent_str.repeat(indent_level + 1));
             }
-            continue;
-        }
+            format_node(child, content, output, indent_level + 1, indent_str, should_inline);
 
-        match ch {
-            '"' => {
-                in_string = true;
-                current_line.push(ch);
-            }
-            '(' | '[' | '{' => {
-                current_line.push(ch);
-
-                // Check if empty (e.g., "()", "[]")
-                let mut peek_chars = chars.clone();
-                let mut is_empty = true;
-                while let Some(&peek_ch) = peek_chars.peek() {
-                    if peek_ch.is_whitespace() {
-                        peek_chars.next();
-                    } else {
-                        is_empty = peek_ch == ')' || peek_ch == ']' || peek_ch == '}';
-                        break;
-                    }
-                }
-
-                if !is_empty {
-                    // Multi-line: write current line and indent
-                    result.push_str(&indent_str.repeat(indent_level));
-                    result.push_str(current_line.trim());
-                    result.push('\n');
-                    current_line.clear();
-                    indent_level += 1;
-                    bracket_depth += 1;
-                    at_line_start = true;
-                }
-                // If empty, stay on same line - current_line still has the opening bracket
-            }
-            ')' | ']' | '}' => {
-                // Check if we're in multi-line mode (bracket_depth > 0)
-                let is_multi_line = bracket_depth > 0;
-
-                if !is_multi_line {
-                    // Single-line mode (empty parens): just append closing bracket
-                    current_line.push(ch);
+            if i < values.len() - 1 {
+                output.push(',');
+                if !should_inline {
+                    output.push('\n');
                 } else {
-                    // Multi-line mode: flush any content, dedent, and write closing bracket
-                    if !current_line.trim().is_empty() {
-                        let line = current_line.trim();
-                        result.push_str(&indent_str.repeat(indent_level));
-                        result.push_str(line);
-                        // Add trailing comma if not already there
-                        if !line.ends_with(',') {
-                            result.push(',');
-                        }
-                        result.push('\n');
-                        current_line.clear();
-                    }
-
-                    // Dedent and write closing bracket
-                    indent_level = indent_level.saturating_sub(1);
-                    bracket_depth = bracket_depth.saturating_sub(1);
-                    result.push_str(&indent_str.repeat(indent_level));
-                    result.push(ch);
-
-                    // Check if there's a trailing comma after the closing bracket in input
-                    let mut peek_chars = chars.clone();
-                    let mut found_comma = false;
-                    while let Some(&peek_ch) = peek_chars.peek() {
-                        if peek_ch == ',' {
-                            found_comma = true;
-                            break;
-                        } else if !peek_ch.is_whitespace() {
-                            break;
-                        }
-                        peek_chars.next();
-                    }
-
-                    if found_comma {
-                        // Consume whitespace and comma from input
-                        while let Some(&peek_ch) = chars.peek() {
-                            if peek_ch == ',' {
-                                chars.next();
-                                result.push(',');
-                                break;
-                            } else if peek_ch.is_whitespace() {
-                                chars.next();
-                            } else {
-                                break;
-                            }
-                        }
-                    } else if bracket_depth > 0 {
-                        // Still nested - check if next non-whitespace is closing bracket
-                        let mut peek_chars2 = chars.clone();
-                        let mut next_is_closing = false;
-                        while let Some(&peek_ch) = peek_chars2.peek() {
-                            if peek_ch.is_whitespace() {
-                                peek_chars2.next();
-                            } else {
-                                next_is_closing =
-                                    peek_ch == ')' || peek_ch == ']' || peek_ch == '}';
-                                break;
-                            }
-                        }
-
-                        // Only add trailing comma if NOT followed by closing bracket
-                        // This avoids "Foo(Bar(...),)" syntax which is invalid in RON
-                        if !next_is_closing {
-                            result.push(',');
-                        }
-                    }
-
-                    result.push('\n');
-                    at_line_start = true;
+                    output.push(' ');
                 }
             }
-            ',' => {
-                current_line.push(ch);
-                result.push_str(&indent_str.repeat(indent_level));
-                result.push_str(current_line.trim());
-                result.push('\n');
-                current_line.clear();
-                at_line_start = true;
-            }
-            '\n' | '\r' => {
-                // Skip newlines, we'll add our own
-                if !current_line.trim().is_empty() && !at_line_start {
-                    current_line.push(' ');
-                }
-            }
-            c if c.is_whitespace() => {
-                if !current_line.trim().is_empty() && !current_line.ends_with(' ') {
-                    current_line.push(' ');
-                }
-            }
-            _ => {
-                current_line.push(ch);
-                at_line_start = false;
-            }
+        }
+
+        if !should_inline {
+            output.push('\n');
+            output.push_str(&indent_str.repeat(indent_level));
         }
     }
 
-    // Flush any remaining content
-    if !current_line.trim().is_empty() {
-        result.push_str(&indent_str.repeat(indent_level));
-        result.push_str(current_line.trim());
-        result.push('\n');
+    output.push(')');
+}
+
+/// Format a field node
+fn format_field(
+    node: &Node,
+    content: &str,
+    output: &mut String,
+    indent_level: usize,
+    indent_str: &str,
+) {
+    // Get field name
+    if let Some(name) = ts_utils::field_name(node, content) {
+        output.push_str(name);
+        output.push_str(": ");
     }
 
-    let formatted = result.trim_end().to_string();
-
-    // Add back annotation if present
-    if let Some(ann) = annotation {
-        format!("{}\n{}", ann, formatted)
-    } else {
-        formatted
+    // Get field value
+    if let Some(value) = ts_utils::field_value(node) {
+        format_node(&value, content, output, indent_level, indent_str, false);
     }
+}
+
+/// Format an array node
+fn format_array(
+    node: &Node,
+    content: &str,
+    output: &mut String,
+    indent_level: usize,
+    indent_str: &str,
+    _inline: bool,
+) {
+    let is_empty = ts_utils::is_empty_structure(node, content);
+
+    if is_empty {
+        output.push_str("[]");
+        return;
+    }
+
+    output.push('[');
+
+    // Get all array elements (named children that aren't punctuation)
+    let elements = ts_utils::named_children(node);
+
+    if !elements.is_empty() {
+        output.push('\n');
+
+        for (i, element) in elements.iter().enumerate() {
+            output.push_str(&indent_str.repeat(indent_level + 1));
+            format_node(element, content, output, indent_level + 1, indent_str, false);
+
+            if i < elements.len() - 1 {
+                output.push(',');
+            } else {
+                output.push(',');
+            }
+            output.push('\n');
+        }
+
+        output.push_str(&indent_str.repeat(indent_level));
+    }
+
+    output.push(']');
+}
+
+/// Format a map node
+fn format_map(
+    node: &Node,
+    content: &str,
+    output: &mut String,
+    indent_level: usize,
+    indent_str: &str,
+    _inline: bool,
+) {
+    let is_empty = ts_utils::is_empty_structure(node, content);
+
+    if is_empty {
+        output.push_str("{}");
+        return;
+    }
+
+    output.push('{');
+
+    // Get all map entries
+    let entries = ts_utils::children_by_kind(node, "map_entry");
+
+    if !entries.is_empty() {
+        output.push('\n');
+
+        for (i, entry) in entries.iter().enumerate() {
+            output.push_str(&indent_str.repeat(indent_level + 1));
+
+            // Format map entry (key: value)
+            let children = ts_utils::named_children(entry);
+            if children.len() >= 2 {
+                // Key
+                format_node(&children[0], content, output, indent_level + 1, indent_str, false);
+                output.push_str(": ");
+                // Value
+                format_node(&children[1], content, output, indent_level + 1, indent_str, false);
+            }
+
+            if i < entries.len() - 1 {
+                output.push(',');
+            } else {
+                output.push(',');
+            }
+            output.push('\n');
+        }
+
+        output.push_str(&indent_str.repeat(indent_level));
+    }
+
+    output.push('}');
+}
+
+/// Format a tuple node
+fn format_tuple(
+    node: &Node,
+    content: &str,
+    output: &mut String,
+    indent_level: usize,
+    indent_str: &str,
+    _inline: bool,
+) {
+    output.push('(');
+
+    let elements = ts_utils::named_children(node);
+
+    if !elements.is_empty() {
+        output.push('\n');
+
+        for (i, element) in elements.iter().enumerate() {
+            output.push_str(&indent_str.repeat(indent_level + 1));
+            format_node(element, content, output, indent_level + 1, indent_str, false);
+
+            if i < elements.len() - 1 {
+                output.push(',');
+            } else {
+                output.push(',');
+            }
+            output.push('\n');
+        }
+
+        output.push_str(&indent_str.repeat(indent_level));
+    }
+
+    output.push(')');
 }
 
 #[cfg(test)]
@@ -266,8 +327,7 @@ mod tests {
         let input = "Unit()";
         let formatted = format_ron(input);
         println!("Formatted: '{}'", formatted);
-        // Empty parens stay on same line
-        assert!(formatted.starts_with("Unit()"));
+        assert_eq!(formatted, "Unit()");
     }
 
     #[test]
@@ -278,7 +338,6 @@ mod tests {
         assert!(formatted.contains("Post("));
         assert!(formatted.contains("    author: User("));
         assert!(formatted.contains("        id: 1,"));
-        // Conservative: no trailing comma when followed by closing bracket (avoids invalid syntax)
         assert!(formatted.contains("    )"));
         assert!(formatted.trim().ends_with(")"));
     }
@@ -291,7 +350,16 @@ mod tests {
         assert!(formatted.contains("roles: ["));
         assert!(formatted.contains(r#"        "admin","#));
         assert!(formatted.contains(r#"        "user","#));
-        // Array closing bracket should be followed by comma on next line
         assert!(formatted.contains("    ],") || formatted.contains("    ]\n)"));
+    }
+
+    #[test]
+    fn test_with_type_annotation() {
+        let input = "/* @[crate::User] */\nUser(id: 1)";
+        let formatted = format_ron(input);
+        println!("Formatted:\n{}", formatted);
+        assert!(formatted.contains("/* @[crate::User] */"));
+        assert!(formatted.contains("User("));
+        assert!(formatted.contains("    id: 1,"));
     }
 }
