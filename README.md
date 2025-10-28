@@ -2,8 +2,9 @@
 
 [![Crates.io](https://img.shields.io/crates/v/ron-lsp.svg)](https://crates.io/crates/ron-lsp)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/jasonjmcghee/ron-lsp#license)
-
+![Visual Studio Marketplace Version](https://img.shields.io/visual-studio-marketplace/v/JasonMcGhee.ron-lsp)
 ![JetBrains Plugin Version](https://img.shields.io/jetbrains/plugin/v/28862-ron-lsp) (Will be public soon, use "releases" for now)
+
 
 
 An LSP for [RON](https://github.com/ron-rs/ron) files that provides autocomplete, diagnostics, go to definition, code actions, and hover support based on Rust type annotations.
@@ -130,7 +131,7 @@ It will use the nearest Cargo.toml starting from the resolved `.ron` file.
 
 Either:
 
-- Grab `.vsix` from releases
+- Grab `.vsix` from [releases](https://github.com/jasonjmcghee/ron-lsp/releases)
 
 OR
 
@@ -150,7 +151,7 @@ Then, either ensure 'ron-lsp' is in your PATH or update `.vscode/settings.json`:
 
 Either:
 
-- Grab `.zip` from releases
+- Grab `.zip` from [releases](https://github.com/jasonjmcghee/ron-lsp/releases)
 
 OR :
 
