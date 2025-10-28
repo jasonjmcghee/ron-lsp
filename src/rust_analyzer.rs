@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use syn::{Attribute, Fields, Item, ItemEnum, ItemStruct, ItemType, Type};
 use tokio::sync::RwLock;
 use walkdir::WalkDir;
@@ -173,20 +173,49 @@ impl RustAnalyzer {
         }
     }
 
+
+    /// Convert a file path to a module path
+    ///
+    /// # Examples
+    /// ```
+    /// let module_path = self.file_file_path_to_module_path("src/models/user.rs");
+    /// assert_eq!(module_path, "crate::models::user");
+    /// ```
     fn file_path_to_module_path(&self, file_path: &Path) -> String {
-        // Convert file path to module path
-        // e.g., src/models/user.rs -> crate::models::user
-        let path_str = file_path.to_string_lossy();
+        let components: Vec<_> = file_path
+            .components()
+            .filter_map(|c| match c {
+                Component::Normal(os) => os.to_str(),
+                _ => None,
+            })
+            .collect();
 
-        if let Some(src_index) = path_str.find("src/") {
-            let relative = &path_str[src_index + 4..];
-            let without_ext = relative.trim_end_matches(".rs");
-            let without_mod = without_ext.trim_end_matches("/mod");
+        if let Some(src_index) = components.iter().position(|c| *c == "src") {
+            let relative = &components[src_index + 1..];
+            if relative.is_empty() {
+                return "crate".to_string();
+            }
 
-            if without_mod == "lib" || without_mod == "main" {
+            let mut parts = relative.to_vec();
+            if let Some(last) = parts.last_mut() {
+                if last.ends_with(".rs") {
+                    let stem = last.trim_end_matches(".rs");
+                    *last = stem;
+                }
+                if *last == "lib" || *last == "main" {
+                    parts.pop();
+                    if parts.is_empty() {
+                        return "crate".to_string();
+                    }
+                } else if *last == "mod" {
+                    parts.pop();
+                }
+            }
+
+            if parts.is_empty() {
                 "crate".to_string()
             } else {
-                format!("crate::{}", without_mod.replace('/', "::"))
+                format!("crate::{}", parts.join("::"))
             }
         } else {
             String::new()
