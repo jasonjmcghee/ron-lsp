@@ -1,0 +1,71 @@
+<idea-plugin>
+    <id>today.jason.ron-lsp-intellij</id>
+    <name>RON LSP</name>
+    <vendor email="ron@jason.today" url="https://github.com/jasonjmcghee/ron-lsp">Jason McGhee</vendor>
+
+    <description><![CDATA[
+    <p>Language Server Protocol support for RON (Rust Object Notation) files.</p>
+
+    <p>Features:</p>
+    <ul>
+        <li>Type validation based on Rust struct/enum definitions</li>
+        <li>Intelligent code completion for fields and enum variants</li>
+        <li>Hover documentation showing field types and docs</li>
+        <li>Go to definition for types and fields</li>
+        <li>Diagnostics for syntax errors, type mismatches, and missing fields</li>
+        <li>Code actions to insert missing/required fields</li>
+        <li>Support for Default trait (optional fields)</li>
+    </ul>
+
+    <p>To use this plugin, you need to have the <code>ron-lsp</code> binary installed and available in your PATH,
+    or configure the path in Settings → RON LSP.</p>
+
+    <p>Add type annotations at the top of your RON files:</p>
+    <pre>/* @[crate::models::User] */
+
+User(
+    id: 1,
+    name: "Alice",
+)</pre>
+    ]]></description>
+
+    <change-notes><![CDATA[
+    <h3>0.1.0</h3>
+    <ul>
+        <li>Initial release</li>
+        <li>LSP integration for RON files</li>
+        <li>Support for diagnostics, completion, hover, go-to-definition, and code actions</li>
+    </ul>
+    ]]></change-notes>
+
+    <!-- Product and plugin compatibility requirements -->
+    <depends>com.intellij.modules.platform</depends>
+    <depends>com.intellij.modules.lsp</depends>
+
+    <extensions defaultExtensionNs="com.intellij">
+        <!-- LSP Support Provider -->
+        <platform.lsp.serverSupportProvider
+                implementation="today.jason.ronlsp.RonLspServerSupportProvider"/>
+
+        <!-- Settings -->
+        <projectConfigurable
+                parentId="tools"
+                instance="today.jason.ronlsp.settings.RonLspSettingsConfigurable"
+                id="today.jason.ronlsp.settings.RonLspSettingsConfigurable"
+                displayName="RON LSP"/>
+
+        <projectService
+                serviceImplementation="today.jason.ronlsp.settings.RonLspSettings"/>
+
+        <fileType
+                name="RON"
+                implementationClass="today.jason.ronlsp.RonFileType"
+                fieldName="INSTANCE"
+                language="RON"
+                extensions="ron"/>
+
+        <lang.syntaxHighlighterFactory
+                language="RON"
+                implementationClass="today.jason.ronlsp.RonSyntaxHighlighterFactory"/>
+    </extensions>
+</idea-plugin>

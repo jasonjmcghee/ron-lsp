@@ -181,8 +181,8 @@ async fn validate_struct_fields(
 
             diagnostics.push(Diagnostic {
                 range: Range::new(Position::new(line, col_start), Position::new(line, col_end)),
-                severity: Some(DiagnosticSeverity::WARNING),
-                message: format!("Missing fields: {}", missing_names.join(", ")),
+                severity: Some(DiagnosticSeverity::ERROR),
+                message: format!("Required fields: {}", missing_names.join(", ")),
                 ..Default::default()
             });
         }
@@ -862,8 +862,8 @@ mod tests {
 
             diagnostics.push(Diagnostic {
                 range: Range::new(Position::new(line, col_start), Position::new(line, col_end)),
-                severity: Some(DiagnosticSeverity::WARNING),
-                message: format!("Missing fields: {}", missing_names.join(", ")),
+                severity: Some(DiagnosticSeverity::ERROR),
+                message: format!("Required fields: {}", missing_names.join(", ")),
                 ..Default::default()
             });
         }

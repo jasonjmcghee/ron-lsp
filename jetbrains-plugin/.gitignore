@@ -1,0 +1,24 @@
+# IntelliJ Platform
+.idea/
+*.iml
+*.ipr
+*.iws
+out/
+build/
+.gradle/
+
+# Gradle
+.gradle
+gradle-app.setting
+!gradle-wrapper.jar
+!gradle-wrapper.properties
+
+# Kotlin
+*.kt.swp
+*.kt.swo
+
+# macOS
+.DS_Store
+
+# Build outputs
+dist/
