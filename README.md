@@ -2,11 +2,8 @@
 
 [![Crates.io](https://img.shields.io/crates/v/ron-lsp.svg)](https://crates.io/crates/ron-lsp)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/jasonjmcghee/ron-lsp#license)
-
 [![Visual Studio Marketplace Badge](https://img.shields.io/badge/Visual%20Studio%20Marketplace-0.1.0-blue.svg)](https://marketplace.visualstudio.com/items?itemName=JasonMcGhee.ron-lsp)
-
-
-![JetBrains Plugin Version](https://img.shields.io/jetbrains/plugin/v/28862-ron-lsp) (Will be public soon, use "releases" for now)
+![JetBrains Plugin Version](https://img.shields.io/jetbrains/plugin/v/28862-ron-lsp)
 
 
 
