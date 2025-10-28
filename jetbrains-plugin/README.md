@@ -20,45 +20,24 @@ Language Server Protocol integration for RON (Rust Object Notation) files in Jet
 
 ## Installation
 
-### From Source
+### Install the LSP Server
+```bash
+cargo install ron-lsp
+```
 
-1. Clone this repository:
-   ```bash
-   git clone https://github.com/jasonjmcghee/ron-lsp.git
-   cd ron-lsp/jetbrains-plugin
-   ```
+### Install the Plugin
 
-2. Build the plugin:
-   ```bash
-   ./gradlew buildPlugin
-   ```
-
-3. Install the plugin:
-   - Open your JetBrains IDE
-   - Go to **Settings/Preferences → Plugins → ⚙️ → Install Plugin from Disk**
-   - Select `build/distributions/ron-lsp-intellij-0.1.0.zip` (or current version)
-
-### From JetBrains Marketplace (Coming Soon)
-
-Search for "RON LSP" in the JetBrains Marketplace within your IDE.
+Search for "RON LSP" in the JetBrains Marketplace within your IDE (**Settings/Preferences → Plugins**).
 
 ## Configuration
 
-1. Build the `ron-lsp` binary:
-   ```bash
-   cd ..
-   cargo build --release
-   ```
-
-2. Either:
-   - Add `target/release/ron-lsp` to your PATH, or
-   - Configure the path in **Settings → Tools → RON LSP → Server path**
+If `ron-lsp` is not in your PATH, configure the binary location in **Settings → Tools → RON LSP → Server path**.
 
 ## Usage
 
 1. Open a Rust project with RON files
 2. Add type annotations to your RON files:
-   ```ron
+```ron
    /* @[crate::models::User] */
 
    User(
@@ -66,7 +45,7 @@ Search for "RON LSP" in the JetBrains Marketplace within your IDE.
        name: "Alice",
        email: "alice@example.com",
    )
-   ```
+```
 
 3. The LSP will automatically:
    - Validate field names and types
@@ -90,26 +69,16 @@ Search for "RON LSP" in the JetBrains Marketplace within your IDE.
 
 Note: Community editions do not support LSP integration.
 
-## Development
-
-### Building
-
-```bash
-./gradlew buildPlugin
-```
-
-And then you can uninstall / install from disk in, e.g. RustRover as needed.
-
 ## Troubleshooting
 
 ### Server not starting
 
-1. Verify `ron-lsp` is installed (or wherever it is located, for example):
-   ```bash
+1. Verify `ron-lsp` is installed:
+```bash
    ron-lsp check
-   ```
+```
 
-2. Check the LSP server path in Settings → Tools → RON LSP
+2. Check the LSP server path in **Settings → Tools → RON LSP**
 
 3. Enable logging in the settings and check IDE logs:
    - **Help → Show Log in Finder/Explorer**
@@ -117,9 +86,9 @@ And then you can uninstall / install from disk in, e.g. RustRover as needed.
 ### No completions or diagnostics
 
 1. Make sure your RON file has a type annotation:
-   ```ron
+```ron
    /* @[crate::models::YourType] */
-   ```
+```
 
 2. Verify the type exists in your Rust project
 
@@ -133,11 +102,33 @@ MIT (except altered Rust logo svg, see below)
 
 The logo used in the Jetbrains plugin is a colorized version of the Rust logo which is [CC-BY 4.0](https://creativecommons.org/licenses/by/4.0/). See Rust logo [specific trademark policy](https://rustfoundation.org/policy/rust-trademark-policy/#art) for additional details.
 
-## Contributing
-
-Contributions are welcome! Please open an issue or pull request on GitHub.
-
 ## Relevant Links
 
 - [ron-lsp](https://github.com/jasonjmcghee/ron-lsp) - The LSP server repository
 - [RON](https://github.com/ron-rs/ron) - Rust Object Notation
+
+---
+
+## Development
+
+### Building from Source
+
+1. Clone this repository:
+```bash
+   git clone https://github.com/jasonjmcghee/ron-lsp.git
+   cd ron-lsp/jetbrains-plugin
+```
+
+2. Build the plugin:
+```bash
+   ./gradlew buildPlugin
+```
+
+3. Install the plugin:
+   - Open your JetBrains IDE
+   - Go to **Settings/Preferences → Plugins → ⚙️ → Install Plugin from Disk**
+   - Select `build/distributions/ron-lsp-intellij-0.1.0.zip` (or current version)
+
+## Contributing
+
+Contributions are welcome! Please open an issue or pull request on GitHub.
