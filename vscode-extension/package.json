@@ -1,10 +1,11 @@
 {
   "name": "ron-lsp",
-  "displayName": "RON Language Server",
-  "description": "Language Server for RON with Rust type support",
+  "displayName": "RON (Rusty Object Notation) LSP and CLI",
+  "description": "An LSP and cli for RON files that provides autocomplete, diagnostics, go to definition, code actions, and hover support based on Rust type annotations",
   "version": "0.1.0",
-  "publisher": "JasonMcGhee",
   "repository": "https://github.com/jasonjmcghee/ron-lsp.git",
+  "publisher": "JasonMcGhee",
+  "author": "Jason McGhee",
   "engines": {
     "vscode": "^1.75.0"
   },

@@ -3,6 +3,9 @@
 [![Crates.io](https://img.shields.io/crates/v/ron-lsp.svg)](https://crates.io/crates/ron-lsp)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/jasonjmcghee/ron-lsp#license)
 
+![JetBrains Plugin Version](https://img.shields.io/jetbrains/plugin/v/28862-ron-lsp) (Will be public soon, use "releases" for now)
+
+
 An LSP for [RON](https://github.com/ron-rs/ron) files that provides autocomplete, diagnostics, go to definition, code actions, and hover support based on Rust type annotations.
 
 <img width="727" height="214" alt="Screenshot 2025-10-24 at 9 59 22 AM" src="https://github.com/user-attachments/assets/e1c436ff-2f58-474e-b97f-14215107067d" />
