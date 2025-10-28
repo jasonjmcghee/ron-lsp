@@ -67,5 +67,10 @@ User(
         <lang.syntaxHighlighterFactory
                 language="RON"
                 implementationClass="today.jason.ronlsp.RonSyntaxHighlighterFactory"/>
+
+        <colorSettingsPage implementation="today.jason.ronlsp.RonColorsSettingsPage"/>
+
+        <additionalTextAttributes scheme="Default" file="colors/RonDefault.xml"/>
+        <additionalTextAttributes scheme="Darcula" file="colors/RonDarcula.xml"/>
     </extensions>
 </idea-plugin>

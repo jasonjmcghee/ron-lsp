@@ -4,4 +4,5 @@
 **/out
 **/*.vsix
 **/.idea
+**/.intellijPlatform
 **/*.trace/

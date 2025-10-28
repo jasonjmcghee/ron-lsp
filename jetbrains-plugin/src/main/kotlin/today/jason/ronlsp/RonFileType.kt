@@ -14,5 +14,5 @@ class RonFileType : LanguageFileType(RonLanguage.INSTANCE) {
 
     override fun getDefaultExtension(): String = "ron"
 
-    override fun getIcon() = RonIcons.FILE
+    override fun getIcon() = RonIcons.RON
 }
