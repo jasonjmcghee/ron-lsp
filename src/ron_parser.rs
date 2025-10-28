@@ -2,6 +2,105 @@ use ron::Value;
 use std::collections::HashSet;
 use tower_lsp::lsp_types::Position;
 
+/// Represents the nesting context at a cursor position
+#[derive(Debug, Clone)]
+pub struct TypeContext {
+    /// The type name we're currently inside (e.g., "User", "Post")
+    pub type_name: String,
+    /// The line where this type context starts
+    pub start_line: usize,
+}
+
+/// Find the nested type context at a cursor position
+/// Returns a stack of type contexts from outermost to innermost
+pub fn find_type_context_at_position(content: &str, position: Position) -> Vec<TypeContext> {
+    let lines: Vec<&str> = content.lines().collect();
+    let mut contexts = Vec::new();
+
+    // Track opening and closing delimiters with their types
+    let mut stack: Vec<(String, usize)> = Vec::new(); // (type_name, line_number)
+
+    for (line_idx, line) in lines.iter().enumerate() {
+        if line_idx > position.line as usize {
+            break;
+        }
+
+        let mut chars = line.chars().peekable();
+        let mut col = 0;
+        let mut in_string = false;
+        let mut escape_next = false;
+
+        while let Some(ch) = chars.next() {
+            // Stop at cursor position on the target line
+            if line_idx == position.line as usize && col >= position.character as usize {
+                break;
+            }
+
+            col += 1;
+
+            if escape_next {
+                escape_next = false;
+                continue;
+            }
+
+            match ch {
+                '\\' if in_string => escape_next = true,
+                '"' => in_string = !in_string,
+                '(' if !in_string => {
+                    // Look back to find the type name before this paren
+                    let before = &line[..col - 1];
+                    if let Some(type_name) = extract_type_name_before_paren(before) {
+                        stack.push((type_name, line_idx));
+                    }
+                }
+                ')' if !in_string => {
+                    stack.pop();
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // Convert stack to TypeContext vec
+    for (type_name, start_line) in stack {
+        contexts.push(TypeContext {
+            type_name,
+            start_line,
+        });
+    }
+
+    contexts
+}
+
+/// Extract the type name before an opening paren
+/// e.g., "author: User" -> Some("User")
+/// e.g., "Post" -> Some("Post")
+fn extract_type_name_before_paren(text: &str) -> Option<String> {
+    let trimmed = text.trim_end();
+
+    // Find the last word (which should be the type name)
+    let chars: Vec<char> = trimmed.chars().collect();
+    let mut end = chars.len();
+
+    // Skip back while we have alphanumeric or underscore
+    while end > 0 && (chars[end - 1].is_alphanumeric() || chars[end - 1] == '_') {
+        end -= 1;
+    }
+
+    if end >= chars.len() {
+        return None;
+    }
+
+    let type_name: String = chars[end..].iter().collect();
+
+    // Only return if it looks like a type (starts with uppercase)
+    if !type_name.is_empty() && type_name.chars().next().unwrap().is_uppercase() {
+        Some(type_name)
+    } else {
+        None
+    }
+}
+
 /// Get the field name at a specific position in RON content
 pub fn get_field_at_position(content: &str, position: Position) -> Option<String> {
     let lines: Vec<&str> = content.lines().collect();
@@ -166,6 +265,32 @@ Post(
         // Position on line without colon after field
         let field = get_field_at_position(content, Position::new(1, 5));
         assert_eq!(field, None);
+    }
+
+    #[test]
+    fn test_find_nested_type_context() {
+        let content = r#"PostReference(Post(
+    id: 42,
+    author: User(
+        name: "Alice",
+    ),
+))"#;
+        // Position inside User
+        let contexts = find_type_context_at_position(content, Position::new(3, 20));
+        assert_eq!(contexts.len(), 3);
+        assert_eq!(contexts[0].type_name, "PostReference");
+        assert_eq!(contexts[1].type_name, "Post");
+        assert_eq!(contexts[2].type_name, "User");
+
+        // Position inside Post but not User
+        let contexts = find_type_context_at_position(content, Position::new(1, 10));
+        assert_eq!(contexts.len(), 2);
+        assert_eq!(contexts[0].type_name, "PostReference");
+        assert_eq!(contexts[1].type_name, "Post");
+
+        // Position at top level
+        let contexts = find_type_context_at_position(content, Position::new(0, 5));
+        assert_eq!(contexts.len(), 0);
     }
 
     #[test]

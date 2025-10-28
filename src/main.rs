@@ -1,7 +1,9 @@
 mod annotation_parser;
+mod code_actions;
 mod completion;
 mod diagnostic_reporter;
 mod diagnostics;
+mod format;
 mod ron_parser;
 mod rust_analyzer;
 
@@ -17,6 +19,11 @@ use tower_lsp::{Client, LanguageServer, LspService, Server};
 pub struct Document {
     content: String,
     type_annotation: Option<String>,
+    // Cache the parsed RON value to avoid re-parsing
+    parsed_value_cache: Option<ron::Value>,
+    // Cache context lookups - map from (line, character) to type contexts
+    // We use a simple cache that stores recent lookups
+    context_cache: std::collections::HashMap<(u32, u32), Vec<ron_parser::TypeContext>>,
 }
 
 pub struct Backend {
@@ -32,6 +39,34 @@ impl Backend {
             documents: Arc::new(RwLock::new(HashMap::new())),
             rust_analyzer: Arc::new(rust_analyzer::RustAnalyzer::new()),
         }
+    }
+
+    /// Get type contexts with caching
+    async fn get_type_contexts(&self, uri: &str, position: Position, content: &str) -> Vec<ron_parser::TypeContext> {
+        let pos_key = (position.line, position.character);
+
+        // Try to get from cache first
+        {
+            let documents = self.documents.read().await;
+            if let Some(doc) = documents.get(uri) {
+                if let Some(cached) = doc.context_cache.get(&pos_key) {
+                    return cached.clone();
+                }
+            }
+        }
+
+        // Not in cache, compute it
+        let contexts = ron_parser::find_type_context_at_position(content, position);
+
+        // Store in cache
+        {
+            let mut documents = self.documents.write().await;
+            if let Some(doc) = documents.get_mut(uri) {
+                doc.context_cache.insert(pos_key, contexts.clone());
+            }
+        }
+
+        contexts
     }
 }
 
@@ -106,6 +141,8 @@ impl LanguageServer for Backend {
                 definition_provider: Some(OneOf::Left(true)),
                 rename_provider: Some(OneOf::Left(true)),
                 code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
+                document_formatting_provider: Some(OneOf::Left(true)),
+                document_range_formatting_provider: Some(OneOf::Left(true)),
                 ..Default::default()
             },
             ..Default::default()
@@ -128,11 +165,16 @@ impl LanguageServer for Backend {
 
         let type_annotation = annotation_parser::parse_type_annotation(&content);
 
+        // Pre-parse RON for caching
+        let parsed_value_cache = ron::from_str::<ron::Value>(&content).ok();
+
         self.documents.write().await.insert(
             uri.clone(),
             Document {
                 content: content.clone(),
                 type_annotation: type_annotation.clone(),
+                parsed_value_cache,
+                context_cache: std::collections::HashMap::new(),
             },
         );
 
@@ -147,11 +189,16 @@ impl LanguageServer for Backend {
             let content = change.text;
             let type_annotation = annotation_parser::parse_type_annotation(&content);
 
+            // Pre-parse RON for caching
+            let parsed_value_cache = ron::from_str::<ron::Value>(&content).ok();
+
             self.documents.write().await.insert(
                 uri.clone(),
                 Document {
                     content: content.clone(),
                     type_annotation: type_annotation.clone(),
+                    parsed_value_cache,
+                    context_cache: std::collections::HashMap::new(),
                 },
             );
 
@@ -202,28 +249,62 @@ impl LanguageServer for Backend {
             .to_string();
         let position = params.text_document_position_params.position;
 
-        let documents = self.documents.read().await;
-        if let Some(doc) = documents.get(&uri) {
-            if let Some(type_path) = &doc.type_annotation {
-                if let Some(type_info) = self.rust_analyzer.get_type_info(type_path).await {
-                    if let Some(field_name) =
-                        ron_parser::get_field_at_position(&doc.content, position)
-                    {
-                        if let Some(fields) = type_info.fields() {
-                            if let Some(field) = fields.iter().find(|f| f.name == field_name) {
-                                return Ok(Some(Hover {
-                                    contents: HoverContents::Markup(MarkupContent {
-                                        kind: MarkupKind::Markdown,
-                                        value: format!(
-                                            "```rust\n{}: {}\n```\n\n{}",
-                                            field.name,
-                                            field.type_name,
-                                            field.docs.as_deref().unwrap_or("")
-                                        ),
-                                    }),
-                                    range: None,
-                                }));
+        // Get document data we need (clone to avoid holding lock during async operations)
+        let (content, type_path) = {
+            let documents = self.documents.read().await;
+            match documents.get(&uri) {
+                Some(doc) => (doc.content.clone(), doc.type_annotation.clone()),
+                None => return Ok(None),
+            }
+        };
+
+        if let Some(type_path) = type_path {
+            // Use cached context lookup
+            let contexts = self.get_type_contexts(&uri, position, &content).await;
+
+            // Start with the top-level type, then traverse nested contexts
+            let mut current_type_info = self.rust_analyzer.get_type_info(&type_path).await;
+
+                // Navigate through the nested contexts
+                for context in contexts.iter().skip(1) {
+                    // Skip first since it's the top-level type we already have
+                    if let Some(info) = current_type_info {
+                        // This context should be a field or variant in the current type
+                        // Try to find it and get its type
+                        if let Some(fields) = info.fields() {
+                            if let Some(field) = fields.iter().find(|f| f.type_name.contains(&context.type_name)) {
+                                current_type_info = self.rust_analyzer.get_type_info(&field.type_name).await;
+                                continue;
                             }
+                        }
+                        // Try as variant
+                        if let Some(variant) = info.find_variant(&context.type_name) {
+                            // For enum variants, we need to check the variant's fields
+                            current_type_info = Some(info); // Stay at enum level
+                            continue;
+                        }
+                        // Try getting the type directly
+                        current_type_info = self.rust_analyzer.get_type_info(&context.type_name).await;
+                    }
+                }
+
+            // Now use the innermost type context
+            if let Some(type_info) = current_type_info {
+                if let Some(field_name) = ron_parser::get_field_at_position(&content, position) {
+                    if let Some(fields) = type_info.fields() {
+                        if let Some(field) = fields.iter().find(|f| f.name == field_name) {
+                            return Ok(Some(Hover {
+                                contents: HoverContents::Markup(MarkupContent {
+                                    kind: MarkupKind::Markdown,
+                                    value: format!(
+                                        "```rust\n{}: {}\n```\n\n{}",
+                                        field.name,
+                                        field.type_name,
+                                        field.docs.as_deref().unwrap_or("")
+                                    ),
+                                }),
+                                range: None,
+                            }));
                         }
                     }
                 }
@@ -244,27 +325,49 @@ impl LanguageServer for Backend {
             .to_string();
         let position = params.text_document_position_params.position;
 
-        let documents = self.documents.read().await;
-        let doc = match documents.get(&uri) {
-            Some(d) => d,
-            None => return Ok(None),
+        // Get document data we need (clone to avoid holding lock during async operations)
+        let (content, type_path) = {
+            let documents = self.documents.read().await;
+            match documents.get(&uri) {
+                Some(doc) => (doc.content.clone(), doc.type_annotation.clone()),
+                None => return Ok(None),
+            }
         };
 
         // Get the word at cursor position - early return if none
-        let word = match get_word_at_position(&doc.content, position) {
+        let word = match get_word_at_position(&content, position) {
             Some(w) => w,
             None => return Ok(None),
         };
 
-        // If we have a type annotation, get the type info once
-        let type_info = if let Some(type_path) = &doc.type_annotation {
-            self.rust_analyzer.get_type_info(type_path).await
+        // If we have a type annotation, find the nested context
+        let mut current_type_info = if let Some(type_path) = type_path {
+            // Use cached context lookup
+            let contexts = self.get_type_contexts(&uri, position, &content).await;
+            let mut info = self.rust_analyzer.get_type_info(&type_path).await;
+
+            // Navigate through nested contexts to find the innermost type
+            for context in contexts.iter().skip(1) {
+                if let Some(current_info) = info {
+                    // Try to find the context type as a field's type
+                    if let Some(fields) = current_info.fields() {
+                        if let Some(field) = fields.iter().find(|f| f.type_name.contains(&context.type_name)) {
+                            info = self.rust_analyzer.get_type_info(&field.type_name).await;
+                            continue;
+                        }
+                    }
+                    // Try as direct type lookup
+                    info = self.rust_analyzer.get_type_info(&context.type_name).await;
+                }
+            }
+
+            info
         } else {
             None
         };
 
-        // Check if the word is a valid field name in this type
-        if let Some(ref info) = type_info {
+        // Check if the word is a valid field name in the current context type
+        if let Some(ref info) = current_type_info {
             if let Some(field) = info.find_field(&word) {
                 return create_location_response(&info.source_file, field.line, field.column);
             }
@@ -281,7 +384,7 @@ impl LanguageServer for Backend {
 
             // Check if we're on a field, and if the word is a variant of that field's type
             // e.g., in "post_type: Short", if cursor is near Short, check if it's a variant of PostType
-            if let Some(field_name) = ron_parser::get_field_at_position(&doc.content, position) {
+            if let Some(field_name) = ron_parser::get_field_at_position(&content, position) {
                 if let Some(field) = info.find_field(&field_name) {
                     // Get the type of this specific field
                     if let Some(field_type_info) =
@@ -360,78 +463,11 @@ impl LanguageServer for Backend {
         if let Some(doc) = documents.get(&uri) {
             if let Some(type_path) = &doc.type_annotation {
                 if let Some(type_info) = self.rust_analyzer.get_type_info(type_path).await {
-                    // Only provide code actions for structs
-                    if let Some(fields) = type_info.fields() {
-                        let ron_fields = ron_parser::extract_fields_from_ron(&doc.content);
+                    let actions =
+                        code_actions::generate_code_actions(&doc.content, &type_info, &uri);
 
-                        // Find missing fields
-                        let all_missing: Vec<_> = fields
-                            .iter()
-                            .filter(|field| !ron_fields.contains(&field.name))
-                            .collect();
-
-                        // Find required missing fields (not Option<T> and no Default trait)
-                        let required_missing: Vec<_> = all_missing
-                            .iter()
-                            .filter(|&&field| !field.type_name.starts_with("Option") && !type_info.has_default)
-                            .copied()
-                            .collect();
-
-                        let mut actions = Vec::new();
-
-                        // Code action: Add all required fields
-                        if !required_missing.is_empty() {
-                            let new_text = generate_field_insertions(&required_missing, &doc.content);
-                            if let Some(edit) = new_text {
-                                let mut changes = std::collections::HashMap::new();
-                                changes.insert(
-                                    tower_lsp::lsp_types::Url::parse(&uri).unwrap(),
-                                    vec![edit],
-                                );
-
-                                actions.push(CodeActionOrCommand::CodeAction(CodeAction {
-                                    title: format!("Add {} required field{}",
-                                        required_missing.len(),
-                                        if required_missing.len() == 1 { "" } else { "s" }
-                                    ),
-                                    kind: Some(CodeActionKind::QUICKFIX),
-                                    edit: Some(WorkspaceEdit {
-                                        changes: Some(changes),
-                                        ..Default::default()
-                                    }),
-                                    ..Default::default()
-                                }));
-                            }
-                        }
-
-                        // Code action: Add all fields
-                        if !all_missing.is_empty() {
-                            let new_text = generate_field_insertions(&all_missing, &doc.content);
-                            if let Some(edit) = new_text {
-                                let mut changes = std::collections::HashMap::new();
-                                changes.insert(
-                                    tower_lsp::lsp_types::Url::parse(&uri).unwrap(),
-                                    vec![edit],
-                                );
-
-                                actions.push(CodeActionOrCommand::CodeAction(CodeAction {
-                                    title: format!("Add all {} missing field{}",
-                                        all_missing.len(),
-                                        if all_missing.len() == 1 { "" } else { "s" }
-                                    ),
-                                    kind: Some(CodeActionKind::QUICKFIX),
-                                    edit: Some(WorkspaceEdit {
-                                        changes: Some(changes),
-                                        ..Default::default()
-                                    }),
-                                    ..Default::default()
-                                }));
-                            }
-                        }
-
-                        if !actions.is_empty() {
-                            return Ok(Some(actions));
-                        }
+                    if !actions.is_empty() {
+                        return Ok(Some(actions));
                     }
                 }
             }
@@ -439,98 +475,81 @@ impl LanguageServer for Backend {
 
         Ok(None)
     }
-}
 
-fn generate_field_insertions(missing_fields: &[&rust_analyzer::FieldInfo], content: &str) -> Option<TextEdit> {
-    // Find the insertion point - right before the closing parenthesis
-    let lines: Vec<&str> = content.lines().collect();
+    async fn formatting(&self, params: DocumentFormattingParams) -> Result<Option<Vec<TextEdit>>> {
+        let uri = params.text_document.uri.to_string();
 
-    // Find the last line with content (before the closing paren)
-    let mut insert_line = 0;
-    let mut insert_col = 0;
-    let mut found_opening = false;
+        let documents = self.documents.read().await;
+        if let Some(doc) = documents.get(&uri) {
+            // Basic RON formatting: normalize whitespace and indentation
+            let formatted = Backend::format_ron(&doc.content);
 
-    for (line_num, line) in lines.iter().enumerate() {
-        if line.contains('(') {
-            found_opening = true;
+            if formatted != doc.content {
+                return Ok(Some(vec![TextEdit {
+                    range: Range::new(Position::new(0, 0), Position::new(u32::MAX, u32::MAX)),
+                    new_text: formatted,
+                }]));
+            }
         }
-        if found_opening && line.contains(')') {
-            insert_line = line_num;
-            // Find the position of the closing paren
-            insert_col = line.find(')').unwrap_or(0);
-            break;
+
+        Ok(None)
+    }
+
+    async fn range_formatting(
+        &self,
+        params: DocumentRangeFormattingParams,
+    ) -> Result<Option<Vec<TextEdit>>> {
+        let uri = params.text_document.uri.to_string();
+        let range = params.range;
+
+        let documents = self.documents.read().await;
+        if let Some(doc) = documents.get(&uri) {
+            // Extract the text in the range
+            let lines: Vec<&str> = doc.content.lines().collect();
+            let start_line = range.start.line as usize;
+            let end_line = range.end.line as usize;
+
+            if start_line < lines.len() && end_line < lines.len() {
+                // Get the selected text
+                let mut selected_text = String::new();
+                for (i, line) in lines
+                    .iter()
+                    .enumerate()
+                    .skip(start_line)
+                    .take(end_line - start_line + 1)
+                {
+                    if i == start_line && i == end_line {
+                        // Single line selection
+                        let start_char = range.start.character as usize;
+                        let end_char = range.end.character as usize;
+                        selected_text
+                            .push_str(&line[start_char.min(line.len())..end_char.min(line.len())]);
+                    } else if i == start_line {
+                        let start_char = range.start.character as usize;
+                        selected_text.push_str(&line[start_char.min(line.len())..]);
+                        selected_text.push('\n');
+                    } else if i == end_line {
+                        let end_char = range.end.character as usize;
+                        selected_text.push_str(&line[..end_char.min(line.len())]);
+                    } else {
+                        selected_text.push_str(line);
+                        selected_text.push('\n');
+                    }
+                }
+
+                // Format the selected text
+                let formatted = Backend::format_ron(&selected_text);
+
+                if formatted != selected_text {
+                    return Ok(Some(vec![TextEdit {
+                        range,
+                        new_text: formatted,
+                    }]));
+                }
+            }
         }
-    }
 
-    if !found_opening {
-        return None;
-    }
-
-    // Check if we need to add a comma before our new fields
-    let needs_comma = if insert_line > 0 {
-        let prev_line = lines[insert_line.saturating_sub(1)].trim();
-        !prev_line.is_empty() && !prev_line.ends_with(',') && !prev_line.ends_with('(')
-    } else {
-        false
-    };
-
-    // Generate the field text
-    let mut field_text = String::new();
-    if needs_comma {
-        field_text.push_str(",\n");
-    } else if insert_line > 0 {
-        field_text.push('\n');
-    }
-
-    // Detect indentation from existing content
-    let indent = if let Some(line_with_field) = lines.iter()
-        .find(|l| l.contains(':') && !l.trim().starts_with("/*"))
-    {
-        let trimmed = line_with_field.trim_start();
-        &line_with_field[..line_with_field.len() - trimmed.len()]
-    } else {
-        "    " // default to 4 spaces
-    };
-
-    for (i, field) in missing_fields.iter().enumerate() {
-        field_text.push_str(indent);
-        field_text.push_str(&field.name);
-        field_text.push_str(": ");
-        field_text.push_str(&generate_default_value(&field.type_name));
-        if i < missing_fields.len() - 1 {
-            field_text.push(',');
-        }
-        field_text.push('\n');
-    }
-
-    Some(TextEdit {
-        range: Range::new(
-            Position::new(insert_line as u32, insert_col as u32),
-            Position::new(insert_line as u32, insert_col as u32),
-        ),
-        new_text: field_text,
-    })
-}
-
-fn generate_default_value(type_name: &str) -> String {
-    let clean = type_name.replace(" ", "");
-
-    if clean.starts_with("Option") {
-        "None".to_string()
-    } else if clean == "bool" {
-        "false".to_string()
-    } else if clean.starts_with("Vec") || clean.starts_with("[") {
-        "[]".to_string()
-    } else if clean.starts_with("HashMap") || clean.starts_with("BTreeMap") {
-        "{}".to_string()
-    } else if clean == "String" || clean == "&str" || clean == "str" {
-        "\"\"".to_string()
-    } else if clean.chars().all(|c| c.is_numeric() || c == 'i' || c == 'u' || c == 'f') {
-        // Numeric types
-        "0".to_string()
-    } else {
-        // Custom type - use constructor notation with placeholder
-        format!("{}()", clean)
+        Ok(None)
     }
 }
 
@@ -614,6 +633,10 @@ fn get_word_at_position(content: &str, position: Position) -> Option<String> {
 }
 
 impl Backend {
+    fn format_ron(content: &str) -> String {
+        format::format_ron(content)
+    }
+
     async fn publish_diagnostics(&self, uri: &str, content: &str, type_annotation: Option<&str>) {
         self.client
             .log_message(
@@ -676,6 +699,174 @@ impl Backend {
         self.client
             .publish_diagnostics(uri.parse().unwrap(), diagnostics, None)
             .await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_format_ron_named_struct() {
+        let input = r#"User(
+    id: 1,
+    name: "Alice",
+    age: 28
+)"#;
+        let formatted = Backend::format_ron(input);
+
+        // Should be able to parse the result
+        let parsed = ron::from_str::<ron::Value>(&formatted);
+        assert!(parsed.is_ok(), "Formatted RON should be parseable. Got: {}", formatted);
+
+        // Original should also be parseable
+        let original_parsed: ron::Value = ron::from_str(input).expect("Original should parse");
+        let formatted_parsed: ron::Value = ron::from_str(&formatted).expect("Formatted should parse");
+
+        // Both should represent the same value
+        assert_eq!(original_parsed, formatted_parsed, "Formatted RON should preserve value");
+    }
+
+    #[test]
+    fn test_format_ron_with_annotation() {
+        let input = r#"/* @[crate::models::User] */
+
+User(
+    id: 1,
+    name: "Alice"
+)"#;
+        let formatted = Backend::format_ron(input);
+
+        // Should preserve annotation
+        assert!(formatted.contains("/* @[crate::models::User] */"),
+                "Should preserve type annotation. Got: {}", formatted);
+
+        // Extract RON part (after annotation)
+        let ron_part = formatted.split("*/").nth(1).unwrap().trim();
+
+        // Should be parseable
+        let parsed = ron::from_str::<ron::Value>(ron_part);
+        assert!(parsed.is_ok(),
+                "Formatted RON (without annotation) should be parseable. Got: {}\nError: {:?}",
+                ron_part, parsed.as_ref().err());
+    }
+
+    #[test]
+    fn test_format_ron_unnamed_struct() {
+        let input = r#"(
+    id: 1,
+    name: "Alice",
+    roles: ["admin", "user"]
+)"#;
+        let formatted = Backend::format_ron(input);
+
+        // Should be able to parse both
+        let original_parsed: ron::Value = ron::from_str(input).expect("Original should parse");
+        let formatted_parsed = ron::from_str::<ron::Value>(&formatted);
+
+        assert!(formatted_parsed.is_ok(),
+                "Formatted RON should be parseable.\nInput:\n{}\n\nFormatted:\n{}\n\nError: {:?}",
+                input, formatted, formatted_parsed.as_ref().err());
+
+        let formatted_parsed = formatted_parsed.unwrap();
+        assert_eq!(original_parsed, formatted_parsed,
+                   "Formatted RON should preserve value.\nOriginal: {:?}\nFormatted: {:?}",
+                   original_parsed, formatted_parsed);
+    }
+
+    #[test]
+    fn test_format_ron_real_example() {
+        // This is actual RON syntax from user.ron
+        let input = r#"/* @[crate::models::User] */
+
+User(
+    id: 1,
+    name: "Alice Johnson",
+    email: "alice@example.com",
+    age: 28,
+    bio: Some("Full-stack developer passionate about Rust and web technologies."),
+    is_active: true,
+    roles: ["admin", "developer"],
+)"#;
+
+        let formatted = Backend::format_ron(input);
+
+        // Should preserve annotation
+        assert!(formatted.contains("/* @[crate::models::User] */"),
+                "Should preserve type annotation");
+
+        // Extract RON part (after annotation)
+        let ron_part = formatted.split("*/").nth(1).unwrap().trim();
+        let original_ron_part = input.split("*/").nth(1).unwrap().trim();
+
+        // Both should parse
+        let original_parsed: ron::Value = ron::from_str(original_ron_part)
+            .expect("Original should parse");
+        let formatted_parsed = ron::from_str::<ron::Value>(ron_part);
+
+        assert!(formatted_parsed.is_ok(),
+                "Formatted RON should be parseable.\n\nOriginal RON:\n{}\n\nFormatted RON:\n{}\n\nError: {:?}",
+                original_ron_part, ron_part, formatted_parsed.as_ref().err());
+
+        let formatted_parsed = formatted_parsed.unwrap();
+        assert_eq!(original_parsed, formatted_parsed,
+                   "Formatted RON should preserve value.\nOriginal: {:?}\nFormatted: {:?}",
+                   original_parsed, formatted_parsed);
+    }
+
+    #[test]
+    fn test_format_ron_outputs_valid_ron() {
+        // Test with the actual mixed_syntax.ron content
+        let input = r#"/* @[crate::models::Post] */
+
+// This demonstrates mixing explicit and unnamed struct syntax
+// throughout the document
+
+Post(
+    id: 123,
+    title: "Mixed Syntax Example",
+    content: "Demonstrating both explicit and unnamed struct syntax",
+
+    // Explicit type name for author
+    author: (
+        id: 5,
+        name: "Charlie",
+        email: "charlie@example.com",
+        age: 28,
+        bio: None,
+        is_active: true,
+        roles: ["editor"],
+    ),
+
+    likes: 50,
+    tags: ["example", "syntax"],
+    published: true,
+    post_type: Short,
+)"#;
+
+        let formatted = Backend::format_ron(input);
+
+        println!("===== FORMATTED OUTPUT =====");
+        println!("{}", formatted);
+        println!("===== END =====");
+
+        // Extract RON part
+        let ron_part = if formatted.contains("*/") {
+            formatted.split("*/").nth(1).unwrap().trim()
+        } else {
+            formatted.trim()
+        };
+
+        // The formatted output MUST be valid RON
+        let parse_result = ron::from_str::<ron::Value>(ron_part);
+        assert!(parse_result.is_ok(),
+                "Formatted output must be valid RON.\n\nFormatted:\n{}\n\nError: {:?}",
+                ron_part, parse_result.err());
+
+        // And it should NOT look like JSON (no leading braces for maps)
+        assert!(!ron_part.trim().starts_with('{'),
+                "Formatted RON should not start with '{{' (that's JSON syntax). Got:\n{}",
+                ron_part);
     }
 }
 

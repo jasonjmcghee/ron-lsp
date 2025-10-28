@@ -1,0 +1,29 @@
+/* @[crate::models::Post] */
+// This demonstrates mixing explicit and unnamed struct syntax
+
+// throughout the document
+Post(
+    id: 123,
+    title: "Mixed Syntax Example",
+    content: "Demonstrating both explicit and unnamed struct syntax",
+
+    // Explicit type name for author
+    author: (
+        id: 5,
+        name: "Charlie",
+        email: "charlie@example.com",
+        age: 28,
+        bio: None,
+        is_active: true,
+        roles: [
+            "editor",
+        ],
+    ),
+    likes: 50,
+    tags: [
+        "example",
+        "syntax",
+    ],
+    published: true,
+    post_type: Short,
+)

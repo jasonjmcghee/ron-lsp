@@ -1,11 +1,15 @@
 /* @[crate::models::Config] */
 Config(
-    // Complete example showing all fields
     // Even though Config has Default, you can still specify all fields
     host: "localhost",
     port: 8080,
     max_connections: 100,
     debug: true,
-    api_key: Some("secret-key-123"),
-    allowed_origins: ["http://localhost:3000", "https://example.com"],
+    allowed_origins: [
+        "http://localhost:3000",
+        "https://example.com",
+    ],
+    api_key: Some(
+        "secret-key-123",
+    )
 )

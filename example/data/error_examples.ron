@@ -1,0 +1,36 @@
+/* @[crate::models::Status] */
+
+// UNCOMMENT THESE ONE AT A TIME TO SEE DIFFERENT DIAGNOSTICS:
+
+// 1. Valid unit variant
+Active
+
+// 2. ERROR: Unit variant with data
+// Active(123)
+// Diagnostic: "Variant 'Active' is a unit variant and cannot have data"
+
+// 3. ERROR: Unknown variant
+// Pending
+// Diagnostic: "Unknown variant 'Pending' for enum 'example::models::Status'"
+
+// 4. ERROR: Wrong type in tuple variant
+// Error("not a number")
+// Diagnostic: Type mismatch - expects u32, got string
+
+// 5. VALID: Correct tuple variant
+// Error(404)
+
+// 6. VALID: Tuple variant with string
+// Warning("Something went wrong")
+
+// 7. VALID: Struct-like variant
+// Processing {
+//     progress: 85,
+//     stage: "Finalizing",
+// }
+
+// 8. ERROR: Struct-like variant with wrong field type
+// Processing {
+//     progress: "85",  // Should be u32, not string
+//     stage: "Testing",
+// }

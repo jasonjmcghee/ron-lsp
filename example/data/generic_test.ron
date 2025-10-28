@@ -1,14 +1,21 @@
 /* @[crate::models::GenericTest] */
-
 GenericTest(
     // Good: Proper Option with Some
-    good_option: Some("This is valid"),
+    good_option: Some(
+        "This is valid",
+    ),
 
     // Bad: Number instead of Option<String>
     bad_option: 12345,
 
     // Good: Proper Vec
-    good_vec: [1, 2, 3, 4, 5],
+    good_vec: [
+        1,
+        2,
+        3,
+        4,
+        5,
+    ],
 
     // Bad: Single integer instead of Vec
     bad_vec: 42,
@@ -33,13 +40,19 @@ GenericTest(
     bad_btreemap: 123,
 
     // Good: Proper HashSet
-    good_hashset: ["apple", "banana", "cherry"],
+    good_hashset: [
+        "apple",
+        "banana",
+        "cherry",
+    ],
 
     // Bad: String instead of HashSet
     bad_hashset: "not a set",
 
     // Good: Proper Result with Ok
-    good_result: Ok("Success!"),
+    good_result: Ok(
+        "Success!",
+    ),
 
     // Bad: Plain string instead of Result
     bad_result: "This should be Ok(...) or Err(...)",
