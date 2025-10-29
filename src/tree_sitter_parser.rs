@@ -26,8 +26,6 @@ impl RonParser {
 pub struct TypeContext {
     /// The type name we're currently inside (e.g., "User", "Post")
     pub type_name: String,
-    /// The line where this type context starts
-    pub start_line: usize,
 }
 
 /// Find the nested type context at a cursor position using tree-sitter
@@ -51,10 +49,8 @@ pub fn find_type_context_at_position(content: &str, position: Position) -> Vec<T
         loop {
             if current.kind() == "struct" {
                 if let Some(type_name) = extract_struct_name(&current, content) {
-                    let start_line = current.start_position().row;
                     contexts.push(TypeContext {
                         type_name,
-                        start_line,
                     });
                 }
             }

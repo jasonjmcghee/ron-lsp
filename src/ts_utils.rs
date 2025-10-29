@@ -71,14 +71,6 @@ pub fn node_to_lsp_range(node: &Node) -> Range {
     }
 }
 
-/// Convert tree-sitter Point to LSP Position
-pub fn point_to_position(point: tree_sitter::Point) -> Position {
-    Position {
-        line: point.row as u32,
-        character: point.column as u32,
-    }
-}
-
 /// Get the text content of a node
 pub fn node_text<'a>(node: &Node, content: &'a str) -> Option<&'a str> {
     node.utf8_text(content.as_bytes()).ok()
@@ -102,17 +94,6 @@ pub fn find_ancestor_by_kind<'a>(mut node: Node<'a>, kind: &str) -> Option<Node<
     None
 }
 
-/// Find the first ancestor of a node matching any of the given kinds
-pub fn find_ancestor_by_kinds<'a>(mut node: Node<'a>, kinds: &[&str]) -> Option<Node<'a>> {
-    while let Some(parent) = node.parent() {
-        if kinds.contains(&parent.kind()) {
-            return Some(parent);
-        }
-        node = parent;
-    }
-    None
-}
-
 /// Get all children of a node with a specific kind
 pub fn children_by_kind<'a>(node: &Node<'a>, kind: &str) -> Vec<Node<'a>> {
     let mut results = Vec::new();
@@ -126,6 +107,7 @@ pub fn children_by_kind<'a>(node: &Node<'a>, kind: &str) -> Vec<Node<'a>> {
 }
 
 /// Get the first child of a node with a specific kind
+#[cfg(test)]
 pub fn child_by_kind<'a>(node: &Node<'a>, kind: &str) -> Option<Node<'a>> {
     let mut cursor = node.walk();
     let result = node.children(&mut cursor).find(|child| child.kind() == kind);
@@ -140,11 +122,6 @@ pub fn named_children<'a>(node: &Node<'a>) -> Vec<Node<'a>> {
         results.push(child);
     }
     results
-}
-
-/// Check if a node is of a specific kind
-pub fn is_kind(node: &Node, kind: &str) -> bool {
-    node.kind() == kind
 }
 
 /// Get the struct/variant name from a struct node
@@ -203,26 +180,6 @@ pub fn field_value<'a>(node: &Node<'a>) -> Option<Node<'a>> {
         .copied()
 }
 
-/// Find all struct nodes in the tree
-pub fn find_all_structs(tree: &Tree) -> Vec<Node> {
-    let mut structs = Vec::new();
-    let root = tree.root_node();
-    collect_nodes_by_kind(&root, "struct", &mut structs);
-    structs
-}
-
-/// Recursively collect all nodes of a specific kind
-fn collect_nodes_by_kind<'a>(node: &Node<'a>, kind: &str, results: &mut Vec<Node<'a>>) {
-    if node.kind() == kind {
-        results.push(*node);
-    }
-
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        collect_nodes_by_kind(&child, kind, results);
-    }
-}
-
 /// Find all fields in a struct node (non-recursive, only direct children)
 pub fn struct_fields<'a>(node: &Node<'a>) -> Vec<Node<'a>> {
     if node.kind() != "struct" {
@@ -257,28 +214,8 @@ pub fn struct_values<'a>(node: &Node<'a>, content: &str) -> Vec<Node<'a>> {
     values
 }
 
-/// Get the type annotation node from the tree
-pub fn find_type_annotation(tree: &Tree) -> Option<Node> {
-    let root = tree.root_node();
-    child_by_kind(&root, "type_annotation")
-}
-
-/// Extract the type path from a type annotation node
-pub fn type_annotation_path<'a>(node: &Node, content: &'a str) -> Option<String> {
-    if node.kind() != "type_annotation" {
-        return None;
-    }
-
-    // Find the type_path child
-    if let Some(type_path) = child_by_kind(node, "type_path") {
-        return node_text(&type_path, content).map(|s| s.to_string());
-    }
-
-    None
-}
-
 /// Find the main value node (the actual RON data, skipping annotation and comments)
-pub fn find_main_value(tree: &Tree) -> Option<Node> {
+pub fn find_main_value(tree: &Tree) -> Option<Node<'_>> {
     let root = tree.root_node();
     let mut cursor = root.walk();
 
@@ -310,52 +247,6 @@ pub fn is_empty_structure(node: &Node, _content: &str) -> bool {
         }
         _ => false
     }
-}
-
-/// Get the depth/nesting level of a node
-pub fn node_depth(node: &Node) -> usize {
-    let mut depth = 0;
-    let mut current = *node;
-    while let Some(parent) = current.parent() {
-        depth += 1;
-        current = parent;
-    }
-    depth
-}
-
-/// Check if position is inside a string node
-pub fn is_inside_string(tree: &Tree, content: &str, position: Position) -> bool {
-    if let Some(node) = node_at_position(tree, content, position) {
-        let mut current = node;
-        loop {
-            if current.kind() == "string" {
-                return true;
-            }
-            match current.parent() {
-                Some(parent) => current = parent,
-                None => break,
-            }
-        }
-    }
-    false
-}
-
-/// Check if position is inside a comment
-pub fn is_inside_comment(tree: &Tree, content: &str, position: Position) -> bool {
-    if let Some(node) = node_at_position(tree, content, position) {
-        let mut current = node;
-        loop {
-            let kind = current.kind();
-            if kind == "line_comment" || kind == "block_comment" {
-                return true;
-            }
-            match current.parent() {
-                Some(parent) => current = parent,
-                None => break,
-            }
-        }
-    }
-    false
 }
 
 /// Information about a parsed enum variant

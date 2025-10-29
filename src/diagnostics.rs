@@ -119,7 +119,6 @@ async fn validate_enum_variant_fields_in_structs(
         let position = Position::new(*first_line as u32, 0);
         let mut contexts = vec![tree_sitter_parser::TypeContext {
             type_name: type_info.name.split("::").last().unwrap_or(&type_info.name).to_string(),
-            start_line: 0,
         }];
         let mut position_contexts = tree_sitter_parser::find_type_context_at_position(content, position);
         if !position_contexts.is_empty() {
@@ -507,6 +506,113 @@ async fn validate_enum_variant_with_fields(
     diagnostics
 }
 
+/// Validate a tree-sitter node representing a value against a TypeInfo
+/// This properly handles nested structures by walking the tree directly
+async fn validate_node_with_type_info<'a>(
+    node: &tree_sitter::Node<'a>,
+    content: &str,
+    type_info: &TypeInfo,
+    analyzer: &Arc<RustAnalyzer>,
+) -> Vec<Diagnostic> {
+    use crate::ts_utils;
+    let mut diagnostics = Vec::new();
+
+    match &type_info.kind {
+        TypeKind::Struct(fields) => {
+            // Validate struct fields
+            if node.kind() == "struct" {
+                let field_nodes = ts_utils::struct_fields(node);
+                let mut present_fields = std::collections::HashSet::new();
+
+                // Check each field in the RON
+                for field_node in field_nodes {
+                    if let Some(field_name) = ts_utils::field_name(&field_node, content) {
+                        present_fields.insert(field_name.to_string());
+
+                        // Check if field exists in type
+                        if let Some(field_info) = fields.iter().find(|f| f.name == field_name) {
+                            // Validate field value recursively if it's a custom type
+                            if let Some(value_node) = ts_utils::field_value(&field_node) {
+                                let field_type_normalized = field_info.type_name.replace(" ", "");
+
+                                // Handle Vec<CustomType>
+                                if let Some(inner_type) = extract_inner_type(&field_type_normalized, "Vec<") {
+                                    if !is_primitive_type(&inner_type) && !is_std_generic_type(&inner_type) {
+                                        if let Some(inner_type_info) = analyzer.get_type_info(&inner_type).await {
+                                            if value_node.kind() == "array" {
+                                                let mut cursor = value_node.walk();
+                                                for elem_node in value_node.children(&mut cursor) {
+                                                    if elem_node.kind() != "[" && elem_node.kind() != "]" && elem_node.kind() != "," {
+                                                        let elem_diags = Box::pin(validate_node_with_type_info(
+                                                            &elem_node,
+                                                            content,
+                                                            &inner_type_info,
+                                                            analyzer,
+                                                        )).await;
+                                                        diagnostics.extend(elem_diags);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                } else if !is_primitive_type(&field_type_normalized) && !is_std_generic_type(&field_type_normalized) {
+                                    // Custom non-generic type - validate recursively
+                                    if let Some(nested_type_info) = analyzer.get_type_info(&field_info.type_name).await {
+                                        let nested_diags = Box::pin(validate_node_with_type_info(
+                                            &value_node,
+                                            content,
+                                            &nested_type_info,
+                                            analyzer,
+                                        )).await;
+                                        diagnostics.extend(nested_diags);
+                                    }
+                                }
+                            }
+                        } else {
+                            // Unknown field
+                            let range = ts_utils::node_to_lsp_range(&field_node.child(0).unwrap());
+                            diagnostics.push(Diagnostic {
+                                range,
+                                severity: Some(DiagnosticSeverity::ERROR),
+                                message: format!("Unknown field '{}'", field_name),
+                                ..Default::default()
+                            });
+                        }
+                    }
+                }
+
+                // Check for missing required fields
+                if !type_info.has_default {
+                    for field in fields {
+                        if !present_fields.contains(&field.name) && !field.type_name.starts_with("Option") {
+                            let target_node = node.child(0).unwrap_or_else(|| *node);
+                            let range = ts_utils::node_to_lsp_range(&target_node);
+                            diagnostics.push(Diagnostic {
+                                range,
+                                severity: Some(DiagnosticSeverity::ERROR),
+                                message: format!("Required fields: {}",
+                                    fields.iter()
+                                        .filter(|f| !present_fields.contains(&f.name) && !f.type_name.starts_with("Option"))
+                                        .map(|f| f.name.as_str())
+                                        .collect::<Vec<_>>()
+                                        .join(", ")
+                                ),
+                                ..Default::default()
+                            });
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        TypeKind::Enum(_variants) => {
+            // Enum validation - handled separately in validate_enum_variant_with_fields
+        }
+    }
+
+    diagnostics
+}
+
 /// Validate the data inside an enum variant (tuple or struct fields)
 /// This recursively validates nested types
 async fn validate_variant_field_data(
@@ -516,16 +622,47 @@ async fn validate_variant_field_data(
 ) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
 
-    // For single-field tuple variants with custom types, recursively validate
-    if expected_fields.len() == 1 && !is_primitive_type(&expected_fields[0].type_name) && !is_std_generic_type(&expected_fields[0].type_name) {
+    // For single-field tuple variants with Vec<CustomType>, use tree-sitter validation
+    if expected_fields.len() == 1 {
         let field_type = &expected_fields[0].type_name;
-        if let Some(nested_type_info) = analyzer.get_type_info(field_type).await {
-            // Recursively validate the nested content (box to avoid infinite size)
-            // Note: For enum variants, the 'data' string already has correct relative positions
-            // within the extracted content, but we don't have the parent context here to adjust them
-            let nested_diags = Box::pin(validate_ron_with_analyzer(data, &nested_type_info, analyzer.clone())).await;
-            diagnostics.extend(nested_diags);
-            return diagnostics;
+        let normalized_type = field_type.replace(" ", "");
+
+        // Check if it's Vec<CustomType>
+        if let Some(inner_type) = extract_inner_type(&normalized_type, "Vec<") {
+            if !is_primitive_type(&inner_type) && !is_std_generic_type(&inner_type) {
+                if let Some(nested_type_info) = analyzer.get_type_info(&inner_type).await {
+                    // Parse with tree-sitter
+                    use crate::ts_utils::{self, RonParser};
+                    let mut parser = RonParser::new();
+
+                    if let Some(tree) = parser.parse(data) {
+                        if let Some(array_node) = ts_utils::find_main_value(&tree) {
+                            if array_node.kind() == "array" {
+                                let mut cursor = array_node.walk();
+                                for elem_node in array_node.children(&mut cursor) {
+                                    if elem_node.kind() != "[" && elem_node.kind() != "]" && elem_node.kind() != "," {
+                                        let elem_diags = Box::pin(validate_node_with_type_info(
+                                            &elem_node,
+                                            data,
+                                            &nested_type_info,
+                                            analyzer,
+                                        )).await;
+                                        diagnostics.extend(elem_diags);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    return diagnostics;
+                }
+            }
+        } else if !is_primitive_type(field_type) {
+            // Non-generic custom type - recursively validate
+            if let Some(nested_type_info) = analyzer.get_type_info(field_type).await {
+                let nested_diags = Box::pin(validate_ron_with_analyzer(data, &nested_type_info, analyzer.clone())).await;
+                diagnostics.extend(nested_diags);
+                return diagnostics;
+            }
         }
     }
 
@@ -1738,6 +1875,135 @@ PostReference(Post(
                 .contains("unit variant") || d.message.contains("cannot have data")),
             "Should error on unit variant with data. Got: {:?}",
             diagnostics
+        );
+    }
+
+    #[tokio::test]
+    async fn test_enum_with_vec_of_custom_type_missing_fields() {
+        let analyzer = Arc::new(RustAnalyzer::new());
+
+        // Create User type info
+        let user_type = TypeInfo {
+            name: "User".to_string(),
+            kind: TypeKind::Struct(vec![
+                FieldInfo {
+                    name: "id".to_string(),
+                    type_name: "u32".to_string(),
+                    docs: None,
+                    line: None,
+                    column: None,
+                },
+                FieldInfo {
+                    name: "name".to_string(),
+                    type_name: "String".to_string(),
+                    docs: None,
+                    line: None,
+                    column: None,
+                },
+                FieldInfo {
+                    name: "email".to_string(),
+                    type_name: "String".to_string(),
+                    docs: None,
+                    line: None,
+                    column: None,
+                },
+                FieldInfo {
+                    name: "age".to_string(),
+                    type_name: "u32".to_string(),
+                    docs: None,
+                    line: None,
+                    column: None,
+                },
+                FieldInfo {
+                    name: "is_active".to_string(),
+                    type_name: "bool".to_string(),
+                    docs: None,
+                    line: None,
+                    column: None,
+                },
+                FieldInfo {
+                    name: "roles".to_string(),
+                    type_name: "Vec<String>".to_string(),
+                    docs: None,
+                    line: None,
+                    column: None,
+                },
+            ]),
+            docs: None,
+            source_file: None,
+            line: None,
+            column: None,
+            has_default: false,
+        };
+
+        // Register User type with the analyzer
+        analyzer.insert_type_for_test(user_type).await;
+
+        // Create Message enum with UserTag variant
+        let type_info = TypeInfo {
+            name: "Message".to_string(),
+            kind: TypeKind::Enum(vec![EnumVariant {
+                name: "UserTag".to_string(),
+                fields: vec![FieldInfo {
+                    name: "0".to_string(),
+                    type_name: "Vec<User>".to_string(),
+                    docs: None,
+                    line: None,
+                    column: None,
+                }],
+                docs: None,
+                line: None,
+                column: None,
+            }]),
+            docs: None,
+            source_file: None,
+            line: None,
+            column: None,
+            has_default: false,
+        };
+
+        // Test with missing required fields in User structs
+        let content = r#"UserTag([User(age: 22), User(email: "hello")])"#;
+        let diagnostics = validate_ron_with_analyzer(content, &type_info, analyzer).await;
+
+        // We expect errors about missing fields
+        // First User(age: 22) is missing: id, name, email, is_active, roles
+        // Second User(email: "hello") is missing: id, name, age, is_active, roles
+        assert!(!diagnostics.is_empty(), "Expected diagnostics for missing fields");
+
+        // Should have 2 diagnostics, one for each struct with missing fields
+        assert_eq!(diagnostics.len(), 2, "Expected 2 diagnostics (one per struct)");
+
+        // Check first struct error
+        assert!(
+            diagnostics[0].message.contains("Required fields"),
+            "First diagnostic should mention required fields"
+        );
+        assert!(
+            diagnostics[0].message.contains("id"),
+            "First struct should be missing 'id' field"
+        );
+        assert!(
+            diagnostics[0].message.contains("name"),
+            "First struct should be missing 'name' field"
+        );
+        assert!(
+            diagnostics[0].message.contains("email"),
+            "First struct should be missing 'email' field"
+        );
+
+        // Check second struct error
+        assert!(
+            diagnostics[1].message.contains("Required fields"),
+            "Second diagnostic should mention required fields"
+        );
+        assert!(
+            diagnostics[1].message.contains("id"),
+            "Second struct should be missing 'id' field"
+        );
+        assert!(
+            diagnostics[1].message.contains("age"),
+            "Second struct should be missing 'age' field"
         );
     }
 }

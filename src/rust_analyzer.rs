@@ -66,17 +66,6 @@ impl TypeInfo {
             TypeKind::Struct(_) => None,
         }
     }
-
-    pub fn variant_fields(&self, variant_name: &str) -> Option<&Vec<FieldInfo>> {
-        match &self.kind {
-            TypeKind::Enum(variants) => {
-                variants.iter()
-                    .find(|v| v.name == variant_name)
-                    .map(|v| &v.fields)
-            }
-            TypeKind::Struct(_) => None,
-        }
-    }
 }
 
 pub struct RustAnalyzer {
@@ -493,6 +482,12 @@ impl RustAnalyzer {
     pub async fn get_all_types(&self) -> Vec<TypeInfo> {
         let cache = self.type_cache.read().await;
         cache.values().cloned().collect()
+    }
+
+    #[cfg(test)]
+    pub async fn insert_type_for_test(&self, type_info: TypeInfo) {
+        let mut cache = self.type_cache.write().await;
+        cache.insert(type_info.name.clone(), type_info);
     }
 }
 
