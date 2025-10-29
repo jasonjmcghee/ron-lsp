@@ -49,6 +49,11 @@ intellijPlatform {
         }
 
         changeNotes = """
+            <h3>0.1.1</h3>
+            <ul>
+                <li>Add icon and color configuration</li>
+                <li>Use JFlex for lexing</li>
+            </ul>
             <h3>0.1.0</h3>
             <ul>
                 <li>Initial release</li>
