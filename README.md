@@ -115,7 +115,10 @@ Config(
 
 ## Editor Integration
 
-### VSCode
+Expand a section below for editor-specific instructions.
+
+<details>
+<summary><h3>VSCode</h3></summary>
 
 Make sure you already did `cargo install ron-lsp`.
 
@@ -139,8 +142,13 @@ Then, either ensure 'ron-lsp' is in your PATH or update `.vscode/settings.json`:
   "ronLsp.serverPath": "/path/to/ron-lsp"
 }
 ```
+</details>
 
-### Jetbrains
+[![Visual Studio Marketplace Badge](https://img.shields.io/badge/Visual%20Studio%20Marketplace-0.1.0-blue.svg)](https://marketplace.visualstudio.com/items?itemName=JasonMcGhee.ron-lsp)
+
+
+<details>
+<summary><h3>JetBrains</h3></summary>
 
 Make sure you already did `cargo install ron-lsp`.
 
@@ -162,18 +170,30 @@ cd jetbrains-plugin
 And "Install Plugin from Disk" and choose the zip.
 
 Then, either ensure 'ron-lsp' is in your PATH or update "Server path" in `Settings > Tools > RON LSP`.
+</details>
 
-### Neovim (with nvim-lspconfig)
+[![JetBrains Plugin Version](https://img.shields.io/jetbrains/plugin/v/28862-ron-lsp)](https://plugins.jetbrains.com/plugin/28862-ron-lsp)
+
+
+<details>
+<summary><h3>Neovim</h3></summary>
 
 Make sure you already did `cargo install ron-lsp`.
 
+Ensure you already have [nvim-lspconfig](https://github.com/neovim/nvim-lspconfig).
+
 Note: If you don't want `ron-lsp` in your path, replace with the absolute path.
 
-Add [ron.lua](./nvim-plugin/ron.lua) to `~/.config/nvim/lua/plugins/ron.lua`:
+Add [ron.lua](./nvim-plugin/ron.lua) to `~/.config/nvim/lua/plugins/ron.lua`.
 
-### Zed / Helix / Other editors
+</details>
 
-See their docs on how to add an LSP, it should be the same.
+<details>
+<summary><h3>Other editors (e.g. Zed / Helix)</h3></summary>
+
+See their docs on how to add an LSP, you should be able to follow them for this plugin.
+
+</details>
 
 ## Contributing
 
