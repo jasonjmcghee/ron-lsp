@@ -1,9 +1,10 @@
 [package]
-name = "tree-sitter-ron"
+name = "ron-lsp-tree-sitter"
 version = "0.1.0"
 edition = "2021"
-description = "RON grammar for tree-sitter"
+description = "RON grammar for tree-sitter, for ron-lsp crate"
 license = "MIT"
+repository = "https://github.com/jasonjmcghee/ron-lsp"
 
 [lib]
 path = "bindings/rust/lib.rs"
