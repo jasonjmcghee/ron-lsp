@@ -119,6 +119,10 @@ Config(
 
 Either:
 
+- [Install `ron-lsp` from the VS Code marketplace](https://marketplace.visualstudio.com/items?itemName=JasonMcGhee.ron-lsp)
+
+OR
+
 - Grab `.vsix` from [releases](https://github.com/jasonjmcghee/ron-lsp/releases)
 
 OR
@@ -138,6 +142,10 @@ Then, either ensure 'ron-lsp' is in your PATH or update `.vscode/settings.json`:
 
 
 Either:
+
+- [Install `ron-lsp` from the JetBrains marketplace](https://plugins.jetbrains.com/plugin/28862-ron-lsp)
+
+OR
 
 - Grab `.zip` from [releases](https://github.com/jasonjmcghee/ron-lsp/releases)
 
