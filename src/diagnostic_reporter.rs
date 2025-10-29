@@ -4,7 +4,7 @@ use ariadne::{Color, Label, Report, ReportKind, Source};
 use std::path::Path;
 use tower_lsp::lsp_types::{Diagnostic as LspDiagnostic, DiagnosticSeverity};
 
-/// A diagnostic that is independent of the output format (LSP or miette)
+/// A diagnostic that is independent of the output format (LSP or ariadne)
 #[derive(Debug, Clone)]
 pub struct Diagnostic {
     pub line: u32,

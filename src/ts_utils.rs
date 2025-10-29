@@ -13,7 +13,7 @@ impl RonParser {
     pub fn new() -> Self {
         let mut parser = Parser::new();
         parser
-            .set_language(&tree_sitter_ron::language())
+            .set_language(&ron_lsp_tree_sitter::language())
             .expect("Error loading RON language");
         Self { parser }
     }
