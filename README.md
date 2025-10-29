@@ -117,6 +117,8 @@ Config(
 
 ### VSCode
 
+Make sure you already did `cargo install ron-lsp`.
+
 Either:
 
 - [Install `ron-lsp` from the VS Code marketplace](https://marketplace.visualstudio.com/items?itemName=JasonMcGhee.ron-lsp)
@@ -140,6 +142,7 @@ Then, either ensure 'ron-lsp' is in your PATH or update `.vscode/settings.json`:
 
 ### Jetbrains
 
+Make sure you already did `cargo install ron-lsp`.
 
 Either:
 
@@ -162,41 +165,11 @@ Then, either ensure 'ron-lsp' is in your PATH or update "Server path" in `Settin
 
 ### Neovim (with nvim-lspconfig)
 
+Make sure you already did `cargo install ron-lsp`.
+
 Note: If you don't want `ron-lsp` in your path, replace with the absolute path.
 
-Add `~/.config/nvim/lua/plugins/ron.lua`:
-
-```lua
-return {
-  {
-    "neovim/nvim-lspconfig",
-    opts = function(_, opts)
-      local configs = require("lspconfig.configs")
-
-      if not configs.ron_lsp then
-        configs.ron_lsp = {
-          default_config = {
-            cmd = { vim.fn.expand("ron-lsp") },
-            filetypes = { "ron" },
-            root_dir = function(fname)
-              local util = require("lspconfig.util")
-              return util.root_pattern("Cargo.toml", ".git")(fname) or vim.loop.cwd()
-            end,
-            settings = {},
-          },
-        }
-      end
-
-      opts.servers = opts.servers or {}
-      opts.servers.ron_lsp = {
-        -- Add any specific on_attach, capabilities, or handlers here if needed
-      }
-
-      return opts
-    end,
-  },
-}
-```
+Add [ron.lua](./nvim-plugin/ron.lua) to `~/.config/nvim/lua/plugins/ron.lua`:
 
 ### Zed / Helix / Other editors
 
