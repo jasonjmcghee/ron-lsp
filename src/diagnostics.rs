@@ -1,6 +1,7 @@
 #[cfg(feature = "cli")]
 use crate::diagnostic_reporter;
-use crate::ron_parser;
+use crate::tree_sitter_parser;
+use crate::ts_utils::ParsedEnumVariant;
 use crate::rust_analyzer::{EnumVariant, FieldInfo, RustAnalyzer, TypeInfo, TypeKind};
 use ron::Value;
 use std::sync::Arc;
@@ -64,6 +65,202 @@ pub async fn validate_ron_with_analyzer(
         }
     }
 
+    // Check for enum variant fields (scans the whole file, so only call once)
+    diagnostics.extend(
+        validate_enum_variant_fields_in_structs(content, type_info, &analyzer).await,
+    );
+
+    // Deduplicate diagnostics by message and position
+    let mut seen = std::collections::HashSet::new();
+    diagnostics.retain(|d| {
+        let key = (d.range.start.line, d.range.start.character, d.message.clone());
+        seen.insert(key)
+    });
+
+    diagnostics
+}
+
+/// Validate enum variant fields within struct fields using the same logic as goto_definition
+async fn validate_enum_variant_fields_in_structs(
+    content: &str,
+    type_info: &TypeInfo,
+    analyzer: &Arc<RustAnalyzer>,
+) -> Vec<Diagnostic> {
+    let mut diagnostics = Vec::new();
+    let mut reported_errors = std::collections::HashSet::new();
+
+    // Collect all variant locations and group by variant to check for missing fields
+    let variant_locations = tree_sitter_parser::find_all_variant_field_locations(content);
+    let mut variant_info: std::collections::HashMap<(String, String), (usize, std::collections::HashSet<String>)> =
+        std::collections::HashMap::new();
+
+    // Cache for variant type lookups: (containing_field_name, variant_name) -> Option<EnumVariant>
+    let mut variant_cache: std::collections::HashMap<(String, String), Option<EnumVariant>> =
+        std::collections::HashMap::new();
+
+    // First pass: collect all fields present for each variant
+    let lines: Vec<&str> = content.lines().collect();
+    for location in &variant_locations {
+        let key = (location.containing_field_name.clone(), location.variant_name.clone());
+        let entry = variant_info.entry(key).or_insert((location.line_idx, std::collections::HashSet::new()));
+        if let Some(ref field_at_pos) = location.field_at_position {
+            entry.1.insert(field_at_pos.clone());
+        }
+    }
+
+    // Second pass: validate unknown fields - do navigation ONCE per unique variant
+    for ((containing_field_name, variant_name), (first_line, _present_fields)) in &variant_info {
+        // Check if we've already looked up this variant
+        if variant_cache.contains_key(&(containing_field_name.clone(), variant_name.clone())) {
+            continue;
+        }
+
+        // Do the expensive navigation once per unique variant
+        let position = Position::new(*first_line as u32, 0);
+        let mut contexts = vec![tree_sitter_parser::TypeContext {
+            type_name: type_info.name.split("::").last().unwrap_or(&type_info.name).to_string(),
+        }];
+        let mut position_contexts = tree_sitter_parser::find_type_context_at_position(content, position);
+        if !position_contexts.is_empty() {
+            position_contexts.pop();
+        }
+        contexts.extend(position_contexts);
+
+        let mut current_type_info = Some(type_info.clone());
+        for context in contexts.iter().skip(1) {
+            let info = match current_type_info {
+                Some(ref info) => info.clone(),
+                None => break,
+            };
+
+            if let Some(fields) = info.fields() {
+                let context_name = &context.type_name;
+                if let Some(field) = fields.iter().find(|f| {
+                    let field_type_last = f.type_name.split("::").last().unwrap_or(&f.type_name);
+                    let field_type_base = field_type_last.split('<').next().unwrap_or(field_type_last);
+                    field_type_base == context_name
+                }) {
+                    current_type_info = analyzer.get_type_info(&field.type_name).await;
+                    continue;
+                }
+            }
+
+            let direct_lookup = analyzer.get_type_info(&context.type_name).await;
+            if direct_lookup.is_some() {
+                current_type_info = direct_lookup;
+            } else {
+                let mut found_via_variant = false;
+                if let Some(variant) = info.find_variant(&context.type_name) {
+                    if variant.fields.len() == 1 {
+                        let field_type = &variant.fields[0].type_name;
+                        current_type_info = analyzer.get_type_info(field_type).await;
+                        found_via_variant = true;
+                    }
+                }
+                if !found_via_variant {
+                    if let Some(fields) = info.fields() {
+                        for field in fields {
+                            if let Some(field_type_info) = analyzer.get_type_info(&field.type_name).await {
+                                if field_type_info.find_variant(&context.type_name).is_some() {
+                                    current_type_info = Some(field_type_info);
+                                    found_via_variant = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                if !found_via_variant {
+                    current_type_info = None;
+                }
+            }
+        }
+
+        // Look up the variant and cache it
+        let variant = if let Some(current_type) = current_type_info {
+            if let Some(field) = current_type.find_field(containing_field_name) {
+                if let Some(field_type_info) = analyzer.get_type_info(&field.type_name).await {
+                    field_type_info.find_variant(variant_name).cloned()
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        variant_cache.insert((containing_field_name.clone(), variant_name.clone()), variant);
+    }
+
+    // Third pass: check all field locations using cached variant info
+    for location in &variant_locations {
+        if let Some(ref field_at_pos) = location.field_at_position {
+            let error_key = (location.line_idx, field_at_pos.clone());
+            if !reported_errors.contains(&error_key) {
+                let cache_key = (location.containing_field_name.clone(), location.variant_name.clone());
+                if let Some(Some(variant)) = variant_cache.get(&cache_key) {
+                    if !variant.fields.iter().any(|f| f.name == *field_at_pos) {
+                        let line = lines.get(location.line_idx).unwrap_or(&"");
+                        if let Some(col) = line.find(&format!("{}:", field_at_pos))
+                            .or_else(|| line.find(&format!("{} :", field_at_pos))) {
+                            diagnostics.push(Diagnostic {
+                                range: Range::new(
+                                    Position::new(location.line_idx as u32, col as u32),
+                                    Position::new(location.line_idx as u32, (col + field_at_pos.len()) as u32),
+                                ),
+                                severity: Some(DiagnosticSeverity::ERROR),
+                                message: format!("Unknown field '{}' in variant '{}'", field_at_pos, location.variant_name),
+                                ..Default::default()
+                            });
+                            reported_errors.insert(error_key);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Fourth pass: check for missing required fields using cached variant info
+    for ((containing_field_name, variant_name), (first_line, present_fields)) in variant_info {
+        let cache_key = (containing_field_name.clone(), variant_name.clone());
+        if let Some(Some(variant)) = variant_cache.get(&cache_key) {
+            // Check for missing required fields
+            for vfield in &variant.fields {
+                if !present_fields.contains(&vfield.name)
+                    && !vfield.type_name.starts_with("Option") {
+                    // Note: We don't have has_default info in the cached variant,
+                    // but typically enum variants don't have defaults
+
+                    // Find the variant opening line to report the error
+                    // Search backwards from first_line to find the line with the variant name
+                    let mut variant_line_idx = first_line;
+                    let mut variant_col = 0;
+                    for i in (0..=first_line).rev() {
+                        if let Some(line) = lines.get(i) {
+                            if let Some(col) = line.find(&variant_name) {
+                                variant_line_idx = i;
+                                variant_col = col;
+                                break;
+                            }
+                        }
+                    }
+
+                    diagnostics.push(Diagnostic {
+                        range: Range::new(
+                            Position::new(variant_line_idx as u32, variant_col as u32),
+                            Position::new(variant_line_idx as u32, (variant_col + variant_name.len()) as u32),
+                        ),
+                        severity: Some(DiagnosticSeverity::ERROR),
+                        message: format!("Missing required field '{}' in variant '{}'", vfield.name, variant_name),
+                        ..Default::default()
+                    });
+                }
+            }
+        }
+    }
+
     diagnostics
 }
 
@@ -113,27 +310,27 @@ async fn validate_struct_fields(
     let mut diagnostics = Vec::new();
 
     // Extract fields from RON using proper parsing
-    let ron_fields = ron_parser::extract_fields_from_ron(content);
+    let ron_fields = tree_sitter_parser::extract_fields_from_ron(content);
 
-    // Check for unknown fields in RON
-    for ron_field in &ron_fields {
-        if !fields.iter().any(|f| &f.name == ron_field) {
-            // Find the position of this field in the content for better error reporting
-            for (line_num, line) in content.lines().enumerate() {
-                if let Some(start_col) = line
-                    .find(&format!("{}: ", ron_field))
-                    .or_else(|| line.find(&format!("{}:", ron_field)))
-                {
-                    diagnostics.push(Diagnostic {
-                        range: Range::new(
-                            Position::new(line_num as u32, start_col as u32),
-                            Position::new(line_num as u32, (start_col + ron_field.len()) as u32),
-                        ),
-                        severity: Some(DiagnosticSeverity::ERROR),
-                        message: format!("Unknown field '{}'", ron_field),
-                        ..Default::default()
-                    });
-                    break;
+    // Check for unknown fields in RON using tree-sitter for position
+    use crate::ts_utils::{self, RonParser};
+    let mut parser = RonParser::new();
+    if let Some(tree) = parser.parse(content) {
+        if let Some(main_value) = ts_utils::find_main_value(&tree) {
+            if main_value.kind() == "struct" {
+                let field_nodes = ts_utils::struct_fields(&main_value);
+                for field_node in field_nodes {
+                    if let Some(field_name) = ts_utils::field_name(&field_node, content) {
+                        if !fields.iter().any(|f| f.name == field_name) {
+                            let range = ts_utils::node_to_lsp_range(&field_node.child(0).unwrap());
+                            diagnostics.push(Diagnostic {
+                                range,
+                                severity: Some(DiagnosticSeverity::ERROR),
+                                message: format!("Unknown field '{}'", field_name),
+                                ..Default::default()
+                            });
+                        }
+                    }
                 }
             }
         }
@@ -309,6 +506,113 @@ async fn validate_enum_variant_with_fields(
     diagnostics
 }
 
+/// Validate a tree-sitter node representing a value against a TypeInfo
+/// This properly handles nested structures by walking the tree directly
+async fn validate_node_with_type_info<'a>(
+    node: &tree_sitter::Node<'a>,
+    content: &str,
+    type_info: &TypeInfo,
+    analyzer: &Arc<RustAnalyzer>,
+) -> Vec<Diagnostic> {
+    use crate::ts_utils;
+    let mut diagnostics = Vec::new();
+
+    match &type_info.kind {
+        TypeKind::Struct(fields) => {
+            // Validate struct fields
+            if node.kind() == "struct" {
+                let field_nodes = ts_utils::struct_fields(node);
+                let mut present_fields = std::collections::HashSet::new();
+
+                // Check each field in the RON
+                for field_node in field_nodes {
+                    if let Some(field_name) = ts_utils::field_name(&field_node, content) {
+                        present_fields.insert(field_name.to_string());
+
+                        // Check if field exists in type
+                        if let Some(field_info) = fields.iter().find(|f| f.name == field_name) {
+                            // Validate field value recursively if it's a custom type
+                            if let Some(value_node) = ts_utils::field_value(&field_node) {
+                                let field_type_normalized = field_info.type_name.replace(" ", "");
+
+                                // Handle Vec<CustomType>
+                                if let Some(inner_type) = extract_inner_type(&field_type_normalized, "Vec<") {
+                                    if !is_primitive_type(&inner_type) && !is_std_generic_type(&inner_type) {
+                                        if let Some(inner_type_info) = analyzer.get_type_info(&inner_type).await {
+                                            if value_node.kind() == "array" {
+                                                let mut cursor = value_node.walk();
+                                                for elem_node in value_node.children(&mut cursor) {
+                                                    if elem_node.kind() != "[" && elem_node.kind() != "]" && elem_node.kind() != "," {
+                                                        let elem_diags = Box::pin(validate_node_with_type_info(
+                                                            &elem_node,
+                                                            content,
+                                                            &inner_type_info,
+                                                            analyzer,
+                                                        )).await;
+                                                        diagnostics.extend(elem_diags);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                } else if !is_primitive_type(&field_type_normalized) && !is_std_generic_type(&field_type_normalized) {
+                                    // Custom non-generic type - validate recursively
+                                    if let Some(nested_type_info) = analyzer.get_type_info(&field_info.type_name).await {
+                                        let nested_diags = Box::pin(validate_node_with_type_info(
+                                            &value_node,
+                                            content,
+                                            &nested_type_info,
+                                            analyzer,
+                                        )).await;
+                                        diagnostics.extend(nested_diags);
+                                    }
+                                }
+                            }
+                        } else {
+                            // Unknown field
+                            let range = ts_utils::node_to_lsp_range(&field_node.child(0).unwrap());
+                            diagnostics.push(Diagnostic {
+                                range,
+                                severity: Some(DiagnosticSeverity::ERROR),
+                                message: format!("Unknown field '{}'", field_name),
+                                ..Default::default()
+                            });
+                        }
+                    }
+                }
+
+                // Check for missing required fields
+                if !type_info.has_default {
+                    for field in fields {
+                        if !present_fields.contains(&field.name) && !field.type_name.starts_with("Option") {
+                            let target_node = node.child(0).unwrap_or_else(|| *node);
+                            let range = ts_utils::node_to_lsp_range(&target_node);
+                            diagnostics.push(Diagnostic {
+                                range,
+                                severity: Some(DiagnosticSeverity::ERROR),
+                                message: format!("Required fields: {}",
+                                    fields.iter()
+                                        .filter(|f| !present_fields.contains(&f.name) && !f.type_name.starts_with("Option"))
+                                        .map(|f| f.name.as_str())
+                                        .collect::<Vec<_>>()
+                                        .join(", ")
+                                ),
+                                ..Default::default()
+                            });
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        TypeKind::Enum(_variants) => {
+            // Enum validation - handled separately in validate_enum_variant_with_fields
+        }
+    }
+
+    diagnostics
+}
+
 /// Validate the data inside an enum variant (tuple or struct fields)
 /// This recursively validates nested types
 async fn validate_variant_field_data(
@@ -318,16 +622,47 @@ async fn validate_variant_field_data(
 ) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
 
-    // For single-field tuple variants with custom types, recursively validate
-    if expected_fields.len() == 1 && !is_primitive_type(&expected_fields[0].type_name) && !is_std_generic_type(&expected_fields[0].type_name) {
+    // For single-field tuple variants with Vec<CustomType>, use tree-sitter validation
+    if expected_fields.len() == 1 {
         let field_type = &expected_fields[0].type_name;
-        if let Some(nested_type_info) = analyzer.get_type_info(field_type).await {
-            // Recursively validate the nested content (box to avoid infinite size)
-            // Note: For enum variants, the 'data' string already has correct relative positions
-            // within the extracted content, but we don't have the parent context here to adjust them
-            let nested_diags = Box::pin(validate_ron_with_analyzer(data, &nested_type_info, analyzer.clone())).await;
-            diagnostics.extend(nested_diags);
-            return diagnostics;
+        let normalized_type = field_type.replace(" ", "");
+
+        // Check if it's Vec<CustomType>
+        if let Some(inner_type) = extract_inner_type(&normalized_type, "Vec<") {
+            if !is_primitive_type(&inner_type) && !is_std_generic_type(&inner_type) {
+                if let Some(nested_type_info) = analyzer.get_type_info(&inner_type).await {
+                    // Parse with tree-sitter
+                    use crate::ts_utils::{self, RonParser};
+                    let mut parser = RonParser::new();
+
+                    if let Some(tree) = parser.parse(data) {
+                        if let Some(array_node) = ts_utils::find_main_value(&tree) {
+                            if array_node.kind() == "array" {
+                                let mut cursor = array_node.walk();
+                                for elem_node in array_node.children(&mut cursor) {
+                                    if elem_node.kind() != "[" && elem_node.kind() != "]" && elem_node.kind() != "," {
+                                        let elem_diags = Box::pin(validate_node_with_type_info(
+                                            &elem_node,
+                                            data,
+                                            &nested_type_info,
+                                            analyzer,
+                                        )).await;
+                                        diagnostics.extend(elem_diags);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    return diagnostics;
+                }
+            }
+        } else if !is_primitive_type(field_type) {
+            // Non-generic custom type - recursively validate
+            if let Some(nested_type_info) = analyzer.get_type_info(field_type).await {
+                let nested_diags = Box::pin(validate_ron_with_analyzer(data, &nested_type_info, analyzer.clone())).await;
+                diagnostics.extend(nested_diags);
+                return diagnostics;
+            }
         }
     }
 
@@ -354,6 +689,15 @@ async fn validate_variant_field_data(
             if expected_fields.iter().all(|f| f.name.parse::<usize>().is_err()) {
                 // Named fields (struct-like variant)
                 if let Some(map) = extract_map_from_value(&value) {
+                    // First, check for unknown fields - extract from the parsed value, not raw data
+                    let mut ron_fields = Vec::new();
+                    for key in map.keys() {
+                        if let Value::String(field_name) = key {
+                            ron_fields.push(field_name.clone());
+                        }
+                    }
+
+                    // Validate field types
                     for field in expected_fields {
                         if let Some(field_value) = map.get(&Value::String(field.name.clone())) {
                             if let Some(error_msg) = check_type_mismatch_with_enum_validation(
@@ -479,183 +823,106 @@ fn is_std_generic_type(type_name: &str) -> bool {
         || clean.starts_with("Arc<")
 }
 
-/// Parsed enum variant with optional data
-#[derive(Debug, Clone)]
-struct ParsedEnumVariant {
-    name: String,
-    data: Option<String>, // Content inside () or {}, or None for unit variants
-    line: u32,
-    col: u32,
-}
 
-/// Extract the variant name and data from raw RON text
+/// Extract the variant name and data from raw RON text using tree-sitter
 /// Enums can be: Simple (Long), tuple (Long(...)), or struct-like (Long { ... })
 fn extract_enum_variant_from_text(content: &str) -> Option<ParsedEnumVariant> {
-    // Skip comments and find the first non-comment line
-    let mut content_start = 0;
-    for (line_num, line) in content.lines().enumerate() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with("//") || trimmed.starts_with("/*") {
-            content_start += line.len() + 1; // +1 for newline
-            continue;
-        }
+    use crate::ts_utils::{self, RonParser};
 
-        // Extract the first word (variant name)
-        // Could be just "Long" or "Long(...))" or "Long { ... }"
-        let variant_end_pos = trimmed
-            .find(|c: char| c == '(' || c == '{' || c.is_whitespace())
-            .unwrap_or(trimmed.len());
-
-        let variant_name = trimmed[..variant_end_pos].trim();
-
-        if variant_name.is_empty() {
-            content_start += line.len() + 1;
-            continue;
-        }
-
-        // Find column position in original line
-        let col = line.find(variant_name).unwrap_or(0) as u32;
-
-        // Extract data if present - search from the position in the full content
-        let data = if let Some(paren_pos) = line.find('(') {
-            // Tuple variant: extract content between matching parens from full content
-            let full_start = content_start + (line.len() - trimmed.len()) + paren_pos;
-            extract_balanced_content(content, full_start, '(', ')')
-        } else if let Some(brace_pos) = line.find('{') {
-            // Struct variant: extract content between matching braces from full content
-            let full_start = content_start + (line.len() - trimmed.len()) + brace_pos;
-            extract_balanced_content(content, full_start, '{', '}')
+    // Skip type annotation if present
+    let ron_content = if content.trim_start().starts_with("/*") {
+        if let Some(end_idx) = content.find("*/") {
+            &content[end_idx + 2..]
         } else {
-            // Unit variant
-            None
-        };
+            content
+        }
+    } else {
+        content
+    };
 
-        return Some(ParsedEnumVariant {
-            name: variant_name.to_string(),
-            data,
-            line: line_num as u32,
-            col,
-        });
-    }
 
-    None
+    let mut parser = RonParser::new();
+    let tree = parser.parse(ron_content)?;
+
+    // Find the main value (should be an identifier or struct representing the variant)
+    let main_value = ts_utils::find_main_value(&tree);
+
+    let main_value = main_value?;
+    ts_utils::extract_enum_variant(&main_value, ron_content)
 }
 
-/// Extract content between balanced delimiters (e.g., matching parens or braces)
-/// Handles nested delimiters and multi-line content
-fn extract_balanced_content(text: &str, start_pos: usize, open: char, close: char) -> Option<String> {
-    let chars: Vec<char> = text[start_pos..].chars().collect();
-    let mut depth = 0;
-    let mut content_start = None;
-    let mut content_end = None;
 
-    for (i, &ch) in chars.iter().enumerate() {
-        if ch == open {
-            depth += 1;
-            if depth == 1 {
-                content_start = Some(i + 1); // Start after opening delimiter
-            }
-        } else if ch == close {
-            depth -= 1;
-            if depth == 0 {
-                content_end = Some(i);
-                break;
-            }
-        }
-    }
-
-    if let (Some(start), Some(end)) = (content_start, content_end) {
-        if start <= end {
-            return Some(chars[start..end].iter().collect());
-        }
-    }
-
-    None
-}
-
-/// Find the position of an enum variant in the content
+/// Find the position of an enum variant in the content using tree-sitter
 #[allow(dead_code)]
 fn find_variant_position(content: &str, variant: &str) -> (u32, u32) {
-    for (line_num, line) in content.lines().enumerate() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with("//") || trimmed.starts_with("/*") {
-            continue;
-        }
+    use crate::ts_utils::{self, RonParser};
 
-        if let Some(col) = line.find(variant) {
-            return (line_num as u32, col as u32);
+    let mut parser = RonParser::new();
+    if let Some(tree) = parser.parse(content) {
+        let variants = ts_utils::find_potential_variants(&tree, content);
+        for v in variants {
+            if let Some(text) = ts_utils::node_text(&v, content) {
+                if text == variant {
+                    let pos = v.start_position();
+                    return (pos.row as u32, pos.column as u32);
+                }
+            }
         }
     }
 
     (0, 0)
 }
 
-/// Find the position of the struct name in the RON content (e.g., "Post" in "Post(...)")
+/// Find the position of the struct name in the RON content using tree-sitter
 /// Returns (line, col_start, col_end) where col_start == col_end indicates unnamed struct
 fn find_struct_name_position(content: &str) -> (u32, u32, u32) {
-    for (line_num, line) in content.lines().enumerate() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with("//") || trimmed.starts_with("/*") {
-            continue;
-        }
+    use crate::ts_utils::{self, RonParser};
 
-        // Look for a struct name followed by '(' (e.g., "Post(")
-        if let Some(open_paren) = trimmed.find('(') {
-            // Extract the struct name before the paren
-            let before_paren = &trimmed[..open_paren];
-            let struct_name = before_paren.trim();
-
-            if !struct_name.is_empty() && struct_name.chars().next().unwrap().is_uppercase() {
-                // Find the position in the original line (not trimmed)
-                if let Some(col_start) = line.find(struct_name) {
-                    return (
-                        line_num as u32,
-                        col_start as u32,
-                        (col_start + struct_name.len()) as u32,
-                    );
+    let mut parser = RonParser::new();
+    if let Some(tree) = parser.parse(content) {
+        if let Some(main_value) = ts_utils::find_main_value(&tree) {
+            if main_value.kind() == "struct" {
+                if let Some(name_node) = main_value.child(0) {
+                    if name_node.kind() == "identifier" {
+                        let pos = name_node.start_position();
+                        let end_pos = name_node.end_position();
+                        return (pos.row as u32, pos.column as u32, end_pos.column as u32);
+                    }
                 }
-            } else if struct_name.is_empty() {
-                // Unnamed struct syntax: starts with '('
-                // Return position of opening paren with col_start == col_end to indicate no name
-                if let Some(paren_pos) = line.find('(') {
-                    return (line_num as u32, paren_pos as u32, paren_pos as u32);
-                }
+                // Unnamed struct
+                let pos = main_value.start_position();
+                return (pos.row as u32, pos.column as u32, pos.column as u32);
             }
         }
     }
 
-    // Default to first character if we can't find it
     (0, 0, 1)
 }
 
-/// Find the position of a field's value in the content for better error reporting
+/// Find the position of a field's value in the content using tree-sitter
 fn find_field_value_position(content: &str, field_name: &str) -> Option<(usize, usize, usize)> {
-    for (line_num, line) in content.lines().enumerate() {
-        // Look for "field_name:" pattern
-        if let Some(field_pos) = line
-            .find(&format!("{}: ", field_name))
-            .or_else(|| line.find(&format!("{}:", field_name)))
-        {
-            // Find where the value starts (after the colon and whitespace)
-            let after_field = field_pos + field_name.len();
-            if let Some(colon_pos) = line[after_field..].find(':') {
-                let value_start = after_field + colon_pos + 1;
-                let trimmed_start = value_start + line[value_start..].len()
-                    - line[value_start..].trim_start().len();
+    use crate::ts_utils::{self, RonParser};
 
-                // Find where the value ends (before comma, closing paren, or end of line)
-                let rest = &line[trimmed_start..];
-                let value_end = rest
-                    .find(',')
-                    .or_else(|| rest.find(')'))
-                    .or_else(|| rest.find('}'))
-                    .or_else(|| rest.find(']'))
-                    .unwrap_or(rest.trim_end().len());
+    let mut parser = RonParser::new();
+    let tree = parser.parse(content)?;
 
-                return Some((line_num, trimmed_start, trimmed_start + value_end));
+    if let Some(main_value) = ts_utils::find_main_value(&tree) {
+        if main_value.kind() == "struct" {
+            let fields = ts_utils::struct_fields(&main_value);
+            for field in fields {
+                if let Some(name) = ts_utils::field_name(&field, content) {
+                    if name == field_name {
+                        if let Some(value_node) = ts_utils::field_value(&field) {
+                            let pos = value_node.start_position();
+                            let end_pos = value_node.end_position();
+                            return Some((pos.row, pos.column, end_pos.column));
+                        }
+                    }
+                }
             }
         }
     }
+
     None
 }
 
@@ -764,73 +1031,39 @@ fn check_type_mismatch_deep(
 
 /// Extract the raw text value for a field, handling nested structures
 fn extract_field_value_text(content: &str, field_name: &str) -> Option<String> {
-    // Find the field in the content
-    let field_pattern = format!("{}:", field_name);
-    let field_pos = content.find(&field_pattern)?;
+    use crate::ts_utils::{self, RonParser};
 
-    // Find where the value starts (after colon and whitespace)
-    let after_field = &content[field_pos + field_pattern.len()..];
-    let value_start = after_field.len() - after_field.trim_start().len();
-    let value_str = &after_field[value_start..];
+    let mut parser = RonParser::new();
+    let tree = parser.parse(content)?;
+    let main_value = ts_utils::find_main_value(&tree)?;
 
-    // Now we need to extract the complete value, which might span multiple lines
-    // and contain nested structures
-    let chars: Vec<char> = value_str.chars().collect();
-    let mut depth = 0;
-    let mut in_string = false;
-    let mut escape_next = false;
-    let mut end_pos = None;
+    if main_value.kind() == "struct" || main_value.kind() == "ERROR" {
+        // For ERROR nodes, find the struct sibling
+        let struct_node = if main_value.kind() == "ERROR" {
+            let root = tree.root_node();
+            let mut cursor = root.walk();
+            let result = root.children(&mut cursor).find(|n| n.kind() == "struct");
+            match result {
+                Some(s) => s,
+                None => return None,
+            }
+        } else {
+            main_value
+        };
 
-    for (i, &ch) in chars.iter().enumerate() {
-        if escape_next {
-            escape_next = false;
-            continue;
-        }
-
-        match ch {
-            '\\' if in_string => escape_next = true,
-            '"' => in_string = !in_string,
-            '(' | '[' | '{' if !in_string => depth += 1,
-            ')' | ']' | '}' if !in_string => {
-                depth -= 1;
-                if depth == 0 {
-                    // We've closed all opened brackets - this is the end of the value
-                    end_pos = Some(i + 1);
-                    break;
-                }
-                if depth < 0 {
-                    // We've reached the end of our parent structure
-                    end_pos = Some(i);
-                    break;
+        let field_nodes = ts_utils::struct_fields(&struct_node);
+        for field_node in field_nodes {
+            if let Some(name) = ts_utils::field_name(&field_node, content) {
+                if name == field_name {
+                    if let Some(value_node) = ts_utils::field_value(&field_node) {
+                        return ts_utils::node_text(&value_node, content).map(|s| s.to_string());
+                    }
                 }
             }
-            ',' if !in_string && depth == 0 => {
-                // Found separator at same depth level
-                end_pos = Some(i);
-                break;
-            }
-            '\n' if !in_string && depth == 0 => {
-                // Check if next line is a new field or closing bracket
-                let rest = &chars[i..];
-                let rest_str: String = rest.iter().collect();
-                let next_line = rest_str.lines().nth(1).unwrap_or("").trim();
-                if next_line.starts_with(')') || next_line.starts_with('}') ||
-                   next_line.starts_with(']') || next_line.contains(':') {
-                    end_pos = Some(i);
-                    break;
-                }
-            }
-            _ => {}
         }
     }
 
-    let value: String = if let Some(end) = end_pos {
-        chars[..end].iter().collect()
-    } else {
-        chars.iter().collect()
-    };
-
-    Some(value.trim().to_string())
+    None
 }
 
 /// Check if a RON value matches the expected Rust type
@@ -987,6 +1220,7 @@ fn extract_inner_type(type_str: &str, wrapper: &str) -> Option<String> {
 }
 
 /// Basic RON syntax validation with better error positioning
+#[allow(dead_code)]
 pub fn validate_ron_syntax(content: &str) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
 
@@ -1641,6 +1875,135 @@ PostReference(Post(
                 .contains("unit variant") || d.message.contains("cannot have data")),
             "Should error on unit variant with data. Got: {:?}",
             diagnostics
+        );
+    }
+
+    #[tokio::test]
+    async fn test_enum_with_vec_of_custom_type_missing_fields() {
+        let analyzer = Arc::new(RustAnalyzer::new());
+
+        // Create User type info
+        let user_type = TypeInfo {
+            name: "User".to_string(),
+            kind: TypeKind::Struct(vec![
+                FieldInfo {
+                    name: "id".to_string(),
+                    type_name: "u32".to_string(),
+                    docs: None,
+                    line: None,
+                    column: None,
+                },
+                FieldInfo {
+                    name: "name".to_string(),
+                    type_name: "String".to_string(),
+                    docs: None,
+                    line: None,
+                    column: None,
+                },
+                FieldInfo {
+                    name: "email".to_string(),
+                    type_name: "String".to_string(),
+                    docs: None,
+                    line: None,
+                    column: None,
+                },
+                FieldInfo {
+                    name: "age".to_string(),
+                    type_name: "u32".to_string(),
+                    docs: None,
+                    line: None,
+                    column: None,
+                },
+                FieldInfo {
+                    name: "is_active".to_string(),
+                    type_name: "bool".to_string(),
+                    docs: None,
+                    line: None,
+                    column: None,
+                },
+                FieldInfo {
+                    name: "roles".to_string(),
+                    type_name: "Vec<String>".to_string(),
+                    docs: None,
+                    line: None,
+                    column: None,
+                },
+            ]),
+            docs: None,
+            source_file: None,
+            line: None,
+            column: None,
+            has_default: false,
+        };
+
+        // Register User type with the analyzer
+        analyzer.insert_type_for_test(user_type).await;
+
+        // Create Message enum with UserTag variant
+        let type_info = TypeInfo {
+            name: "Message".to_string(),
+            kind: TypeKind::Enum(vec![EnumVariant {
+                name: "UserTag".to_string(),
+                fields: vec![FieldInfo {
+                    name: "0".to_string(),
+                    type_name: "Vec<User>".to_string(),
+                    docs: None,
+                    line: None,
+                    column: None,
+                }],
+                docs: None,
+                line: None,
+                column: None,
+            }]),
+            docs: None,
+            source_file: None,
+            line: None,
+            column: None,
+            has_default: false,
+        };
+
+        // Test with missing required fields in User structs
+        let content = r#"UserTag([User(age: 22), User(email: "hello")])"#;
+        let diagnostics = validate_ron_with_analyzer(content, &type_info, analyzer).await;
+
+        // We expect errors about missing fields
+        // First User(age: 22) is missing: id, name, email, is_active, roles
+        // Second User(email: "hello") is missing: id, name, age, is_active, roles
+        assert!(!diagnostics.is_empty(), "Expected diagnostics for missing fields");
+
+        // Should have 2 diagnostics, one for each struct with missing fields
+        assert_eq!(diagnostics.len(), 2, "Expected 2 diagnostics (one per struct)");
+
+        // Check first struct error
+        assert!(
+            diagnostics[0].message.contains("Required fields"),
+            "First diagnostic should mention required fields"
+        );
+        assert!(
+            diagnostics[0].message.contains("id"),
+            "First struct should be missing 'id' field"
+        );
+        assert!(
+            diagnostics[0].message.contains("name"),
+            "First struct should be missing 'name' field"
+        );
+        assert!(
+            diagnostics[0].message.contains("email"),
+            "First struct should be missing 'email' field"
+        );
+
+        // Check second struct error
+        assert!(
+            diagnostics[1].message.contains("Required fields"),
+            "Second diagnostic should mention required fields"
+        );
+        assert!(
+            diagnostics[1].message.contains("id"),
+            "Second struct should be missing 'id' field"
+        );
+        assert!(
+            diagnostics[1].message.contains("age"),
+            "Second struct should be missing 'age' field"
         );
     }
 }

@@ -1,0 +1,10 @@
+/* @[crate::models::Message] */
+
+UserTag([
+    User(
+        age: 22,
+    ),
+    User(
+        email: "hello",
+    )
+])

@@ -26,7 +26,8 @@ PostReference(
         ],
         published: true,
         post_type: Detailed(
-            length: 1,
+            length: 1, 
+            blah: 3.0
         ),
     )
 )
