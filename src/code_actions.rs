@@ -861,6 +861,7 @@ mod tests {
             client: client.clone(),
             documents: Default::default(),
             rust_analyzer: analyzer.clone(),
+            config: Arc::new(Default::default()),
         });
         let client = service.inner().client.clone();
 
