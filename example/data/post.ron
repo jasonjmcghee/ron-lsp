@@ -1,4 +1,4 @@
-/* @[crate::models::Post] */
+// No type annotation here, the type will be resolved from configuration in ron.toml
 Post(
     id: 101,
     title: "Getting Started with Rust",
