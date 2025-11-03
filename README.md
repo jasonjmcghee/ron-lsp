@@ -113,6 +113,40 @@ Config(
 
 <img width="707" height="436" alt="Screenshot 2025-10-24 at 5 52 13 PM" src="https://github.com/user-attachments/assets/f638947d-0408-4a7d-a209-de8e5d56c15d" />
 
+## ron.toml configuration
+
+You can configure default type mappings for RON files using an optional ron.toml file at your project root
+(next to Cargo.toml).
+
+This lets you omit the [Type Annotation](#type-annotation-format) in RON files whose paths match a glob pattern
+which is useful if you have multiple files with the same type (e.g., bevy assets).
+
+Example:
+
+```toml
+[[types]]
+# Matches all files named `post.ron`
+glob = "**/post.ron"
+# Fully qualified type name
+type = "crate::models::Post"
+
+[[types]]
+# Matches all files ron files in the `config` directory
+glob = "**/config/*.ron"
+type = "crate::models::Config"
+
+[[types]]
+# Matches all files ending with .user.ron
+glob = "**/*.user.ron"
+type = "crate::models::User"
+```
+
+### Precedence
+
+1. Type annotation in RON file
+2. Type declaration in ron.toml, declarations are tested in the order of the file
+
+
 ## Editor Integration
 
 Expand a section below for editor-specific instructions.

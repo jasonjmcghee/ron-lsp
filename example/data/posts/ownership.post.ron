@@ -1,0 +1,15 @@
+Post(
+    id: 102,
+    title: "Ownership and Borrowing in Rust",
+    content: "# Ownership & Borrowing\n\nUnderstanding ownership is key to mastering Rust...",
+    author: 2,
+    likes: 58.0,
+    tags: [
+        "rust",
+        "ownership",
+        "borrowing",
+        "memory-safety",
+    ],
+    post_type: Long,
+    foo: 2,
+)
