@@ -552,6 +552,7 @@ mod tests {
                     docs: Some("Field A documentation".to_string()),
                     line: Some(10),
                     column: Some(8),
+                    has_default: false,
                 },
                 FieldInfo {
                     name: "field_b".to_string(),
@@ -559,6 +560,7 @@ mod tests {
                     docs: None,
                     line: Some(11),
                     column: Some(8),
+                    has_default: false,
                 },
             ],
             docs: Some("A struct variant".to_string()),
@@ -616,6 +618,7 @@ mod tests {
                 docs: None,
                 line: None,
                 column: None,
+                has_default: false,
             }],
             docs: Some("A tuple variant".to_string()),
             line: Some(10),

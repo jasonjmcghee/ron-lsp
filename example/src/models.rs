@@ -105,7 +105,7 @@ pub struct Config {
 }
 
 /// A settings struct without Default
-/// All non-Option fields are required in RON files
+/// All non-Option fields and fields not marked with `#[serde(default)]` are required in RON files
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
     /// Application name
@@ -118,6 +118,7 @@ pub struct Settings {
     pub description: Option<String>,
 
     /// Feature flags enabled
+    #[serde(default)]
     pub features: Vec<String>,
 }
 

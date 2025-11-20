@@ -12,6 +12,13 @@ pub struct FieldInfo {
     pub docs: Option<String>,
     pub line: Option<usize>,
     pub column: Option<usize>,
+    pub has_default: bool,
+}
+
+impl FieldInfo {
+    pub fn is_optional(&self) -> bool {
+        self.type_name.starts_with("Option") || self.has_default
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -53,7 +60,8 @@ impl TypeInfo {
             TypeKind::Struct(fields) => fields.iter().find(|f| f.name == field_name),
             TypeKind::Enum(variants) => {
                 // Search through all variants' fields
-                variants.iter()
+                variants
+                    .iter()
                     .flat_map(|v| &v.fields)
                     .find(|f| f.name == field_name)
             }
@@ -263,12 +271,16 @@ impl RustAnalyzer {
                         })
                         .unzip();
 
+                    let field_attributes = serde_attributes::extract_serde_field_attributes(field);
+                    let has_default = field_attributes.has_default;
+
                     FieldInfo {
                         name: field_name,
                         type_name,
                         docs: field_docs,
                         line,
                         column,
+                        has_default,
                     }
                 })
                 .collect(),
@@ -278,12 +290,17 @@ impl RustAnalyzer {
                 .enumerate()
                 .map(|(i, field)| {
                     let type_name = type_to_string(&field.ty);
+
+                    let field_attributes = serde_attributes::extract_serde_field_attributes(field);
+                    let has_default = field_attributes.has_default;
+
                     FieldInfo {
                         name: i.to_string(),
                         type_name,
                         docs: None,
                         line: None,
                         column: None,
+                        has_default,
                     }
                 })
                 .collect(),
@@ -348,12 +365,17 @@ impl RustAnalyzer {
                                 })
                                 .unzip();
 
+
+                            let field_attributes = serde_attributes::extract_serde_field_attributes(field);
+                            let has_default = field_attributes.has_default;
+
                             FieldInfo {
                                 name: field_name,
                                 type_name,
                                 docs: field_docs,
                                 line,
                                 column,
+                                has_default
                             }
                         })
                         .collect(),
@@ -363,12 +385,17 @@ impl RustAnalyzer {
                         .enumerate()
                         .map(|(i, field)| {
                             let type_name = type_to_string(&field.ty);
+
+                            let field_attributes = serde_attributes::extract_serde_field_attributes(field);
+                            let has_default = field_attributes.has_default;
+
                             FieldInfo {
                                 name: i.to_string(),
                                 type_name,
                                 docs: None,
                                 line: None,
                                 column: None,
+                                has_default,
                             }
                         })
                         .collect(),
@@ -548,3 +575,34 @@ fn type_to_string(ty: &Type) -> String {
         _ => quote::quote!(#ty).to_string(),
     }
 }
+
+mod serde_attributes {
+    use syn::Field;
+
+    pub struct SerdeFieldAttributes {
+        pub has_default: bool,
+    }
+
+    pub fn extract_serde_field_attributes(field: &Field) -> SerdeFieldAttributes {
+        let mut field_attrs = SerdeFieldAttributes { has_default: false };
+
+        let attrs = field
+            .attrs
+            .iter()
+            .filter(|attr| attr.path().is_ident("serde"));
+
+        for attr in attrs {
+            let _ = attr.parse_nested_meta(|meta| {
+                // #[serde(default)]
+                if meta.path.is_ident("default") {
+                    field_attrs.has_default = true;
+                }
+                Ok(())
+            });
+        }
+
+        field_attrs
+    }
+}
+
+

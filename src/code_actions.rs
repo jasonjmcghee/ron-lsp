@@ -122,7 +122,7 @@ async fn generate_missing_variant_field_actions(
 
                     let required_missing: Vec<_> = missing_fields
                         .iter()
-                        .filter(|&&vfield| !vfield.type_name.starts_with("Option") && !field_type_info.has_default)
+                        .filter(|&&vfield| !vfield.is_optional() && !field_type_info.has_default)
                         .copied()
                         .collect();
 
@@ -213,7 +213,7 @@ fn generate_missing_field_actions(
 
                 let required_missing: Vec<_> = all_missing
                     .iter()
-                    .filter(|&&field| !field.type_name.starts_with("Option") && !type_info.has_default)
+                    .filter(|&&field| !field.is_optional() && !type_info.has_default)
                     .copied()
                     .collect();
 
@@ -286,7 +286,7 @@ fn generate_missing_field_actions(
     // Find required missing fields (not Option<T> and no Default trait)
     let required_missing: Vec<_> = all_missing
         .iter()
-        .filter(|&&field| !field.type_name.starts_with("Option") && !type_info.has_default)
+        .filter(|&&field| !field.is_optional() && !type_info.has_default)
         .copied()
         .collect();
 
@@ -644,6 +644,7 @@ mod tests {
             docs: None,
             line: None,
             column: None,
+            has_default: false,
         };
         let uri = "file:///test.ron";
 
@@ -678,6 +679,7 @@ mod tests {
             docs: None,
             line: None,
             column: None,
+            has_default: false,
         };
         let uri = "file:///test.ron";
 
@@ -706,6 +708,7 @@ mod tests {
             docs: None,
             line: None,
             column: None,
+            has_default: false,
         };
         let uri = "file:///test.ron";
 
@@ -749,6 +752,7 @@ mod tests {
             docs: None,
             line: None,
             column: None,
+            has_default: false,
         };
         let uri = "file:///test.ron";
 
@@ -786,6 +790,7 @@ mod tests {
             docs: None,
             line: None,
             column: None,
+            has_default: false,
         };
         let uri = "file:///test.ron";
 
@@ -823,6 +828,7 @@ mod tests {
                     docs: None,
                     line: Some(10),
                     column: Some(8),
+                    has_default: false,
                 },
                 FieldInfo {
                     name: "field_b".to_string(),
@@ -830,6 +836,7 @@ mod tests {
                     docs: None,
                     line: Some(11),
                     column: Some(8),
+                    has_default: false,
                 },
             ],
             docs: None,
