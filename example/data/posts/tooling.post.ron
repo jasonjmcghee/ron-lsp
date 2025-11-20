@@ -1,0 +1,15 @@
+Post(
+    id: 103,
+    title: "Rust Tooling: Cargo and Crates.io",
+    content: "# Using Cargo\n\nCargo is Rust's package manager and build tool...",
+    author: 1,
+    likes: 37.5,
+    tags: [
+        "rust",
+        "cargo",
+        "tooling",
+        "package-management",
+    ],
+    post_type: Short,
+    foo: 3,
+)
