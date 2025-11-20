@@ -423,7 +423,7 @@ async fn validate_struct_fields(
         let missing_fields: Vec<_> = fields
             .iter()
             .filter(|field| {
-                !ron_fields.contains(&field.name) && !field.type_name.starts_with("Option")
+                !ron_fields.contains(&field.name) && !field.is_optional()
             })
             .collect();
 
@@ -584,7 +584,7 @@ async fn validate_node_with_type_info<'a>(
                 // Check for missing required fields
                 if !type_info.has_default {
                     for field in fields {
-                        if !present_fields.contains(&field.name) && !field.type_name.starts_with("Option") {
+                        if !present_fields.contains(&field.name) && !field.is_optional() {
                             let target_node = node.child(0).unwrap_or_else(|| *node);
                             let range = ts_utils::node_to_lsp_range(&target_node);
                             diagnostics.push(Diagnostic {
@@ -1438,6 +1438,7 @@ mod tests {
                     docs: None,
                     line: None,
                     column: None,
+                    has_default: false,
                 },
                 FieldInfo {
                     name: "title".to_string(),
@@ -1445,6 +1446,7 @@ mod tests {
                     docs: None,
                     line: None,
                     column: None,
+                    has_default: false,
                 },
                 FieldInfo {
                     name: "post_type".to_string(),
@@ -1452,6 +1454,7 @@ mod tests {
                     docs: None,
                     line: None,
                     column: None,
+                    has_default: false,
                 },
             ]),
             docs: None,
@@ -1488,6 +1491,7 @@ mod tests {
                     docs: None,
                     line: None,
                     column: None,
+                    has_default: false,
                 },
                 FieldInfo {
                     name: "author".to_string(),
@@ -1495,6 +1499,7 @@ mod tests {
                     docs: None,
                     line: None,
                     column: None,
+                    has_default: false,
                 },
             ]),
             docs: None,
@@ -1548,6 +1553,7 @@ mod tests {
                     docs: None,
                     line: None,
                     column: None,
+                    has_default: false,
                 },
                 FieldInfo {
                     name: "name".to_string(),
@@ -1555,6 +1561,7 @@ mod tests {
                     docs: None,
                     line: None,
                     column: None,
+                    has_default: false,
                 },
             ]),
             docs: None,
@@ -1615,6 +1622,7 @@ mod tests {
                     docs: None,
                     line: None,
                     column: None,
+                    has_default: false,
                 },
                 FieldInfo {
                     name: "post_type".to_string(),
@@ -1622,6 +1630,7 @@ mod tests {
                     docs: None,
                     line: None,
                     column: None,
+                    has_default: false,
                 },
             ]),
             docs: None,
@@ -1656,6 +1665,7 @@ mod tests {
                     docs: None,
                     line: None,
                     column: None,
+                    has_default: false,
                 },
                 FieldInfo {
                     name: "name".to_string(),
@@ -1663,6 +1673,7 @@ mod tests {
                     docs: None,
                     line: None,
                     column: None,
+                    has_default: false,
                 },
             ]),
             docs: None,
@@ -1700,6 +1711,7 @@ mod tests {
                         docs: None,
                         line: None,
                         column: None,
+                        has_default: false,
                     }],
                     docs: None,
                     line: None,
@@ -1713,6 +1725,7 @@ mod tests {
                         docs: None,
                         line: None,
                         column: None,
+                        has_default: false,
                     }],
                     docs: None,
                     line: None,
@@ -1761,6 +1774,7 @@ mod tests {
                         docs: None,
                         line: None,
                         column: None,
+                        has_default: false,
                     },
                     FieldInfo {
                         name: "sender".to_string(),
@@ -1768,6 +1782,7 @@ mod tests {
                         docs: None,
                         line: None,
                         column: None,
+                        has_default: false,
                     },
                 ],
                 docs: None,
@@ -1892,6 +1907,7 @@ PostReference(Post(
                     docs: None,
                     line: None,
                     column: None,
+                    has_default: false,
                 },
                 FieldInfo {
                     name: "name".to_string(),
@@ -1899,6 +1915,7 @@ PostReference(Post(
                     docs: None,
                     line: None,
                     column: None,
+                    has_default: false,
                 },
                 FieldInfo {
                     name: "email".to_string(),
@@ -1906,6 +1923,7 @@ PostReference(Post(
                     docs: None,
                     line: None,
                     column: None,
+                    has_default: false,
                 },
                 FieldInfo {
                     name: "age".to_string(),
@@ -1913,6 +1931,7 @@ PostReference(Post(
                     docs: None,
                     line: None,
                     column: None,
+                    has_default: false,
                 },
                 FieldInfo {
                     name: "is_active".to_string(),
@@ -1920,6 +1939,7 @@ PostReference(Post(
                     docs: None,
                     line: None,
                     column: None,
+                    has_default: false,
                 },
                 FieldInfo {
                     name: "roles".to_string(),
@@ -1927,6 +1947,7 @@ PostReference(Post(
                     docs: None,
                     line: None,
                     column: None,
+                    has_default: false,
                 },
             ]),
             docs: None,
@@ -1950,6 +1971,7 @@ PostReference(Post(
                     docs: None,
                     line: None,
                     column: None,
+                    has_default: false,
                 }],
                 docs: None,
                 line: None,
