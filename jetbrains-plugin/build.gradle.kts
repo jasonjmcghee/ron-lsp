@@ -29,7 +29,7 @@ configurations {
 
 dependencies {
     intellijPlatform {
-        intellijIdeaUltimate("2025.3")
+        intellijIdeaUltimate("2025.2.4")
         instrumentationTools()
     }
     implementation("org.jetbrains:annotations:26.0.2")
@@ -44,13 +44,14 @@ intellijPlatform {
         version = project.version.toString()
 
         ideaVersion {
-            sinceBuild = "253"
+            sinceBuild = "252"
+            untilBuild = provider { null }
         }
 
         changeNotes = """
             <h3>0.1.2</h3>
             <ul>
-                <li>Enhance idea version support</li>
+                <li>Support versions after 252</li>
             </ul>
             <h3>0.1.1</h3>
             <ul>
