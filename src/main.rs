@@ -1635,7 +1635,7 @@ use clap::{Parser, Subcommand};
 #[cfg(feature = "cli")]
 #[derive(Parser)]
 #[command(name = "ron-lsp")]
-#[command(about = "LSP server and validator for RON files", long_about = None)]
+#[command(about = "LSP server and validator for RON files", long_about = None, version)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
