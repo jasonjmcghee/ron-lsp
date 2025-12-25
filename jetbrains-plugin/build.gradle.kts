@@ -8,11 +8,11 @@ plugins {
 }
 
 group = "today.jason"
-version = "0.1.1"
+version = "0.1.2"
 
 java {
     toolchain {
-        languageVersion.set(JavaLanguageVersion.of(17))
+        languageVersion.set(JavaLanguageVersion.of(21))
     }
 }
 
@@ -29,7 +29,7 @@ configurations {
 
 dependencies {
     intellijPlatform {
-        intellijIdeaUltimate("2025.2.4")
+        intellijIdeaUltimate("2025.3")
         instrumentationTools()
     }
     implementation("org.jetbrains:annotations:26.0.2")
@@ -44,11 +44,14 @@ intellijPlatform {
         version = project.version.toString()
 
         ideaVersion {
-            sinceBuild = "252"
-            untilBuild = "252.*"
+            sinceBuild = "253"
         }
 
         changeNotes = """
+            <h3>0.1.2</h3>
+            <ul>
+                <li>Enhance idea version support</li>
+            </ul>
             <h3>0.1.1</h3>
             <ul>
                 <li>Add icon and color configuration</li>
@@ -116,13 +119,13 @@ tasks {
     }
 
     withType<JavaCompile> {
-        sourceCompatibility = "17"
-        targetCompatibility = "17"
+        sourceCompatibility = "21"
+        targetCompatibility = "21"
         dependsOn(generateLexer)
     }
 
     withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile> {
-        compilerOptions.jvmTarget.set(JvmTarget.JVM_17)
+        compilerOptions.jvmTarget.set(JvmTarget.JVM_21)
     }
 
     compileKotlin {
