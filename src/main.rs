@@ -44,6 +44,15 @@ impl Backend {
         }
     }
 
+    pub fn with_analyzer(client: Client, analyzer: rust_analyzer::RustAnalyzer) -> Self {
+        Self {
+            client,
+            documents: Arc::new(RwLock::new(HashMap::new())),
+            rust_analyzer: Arc::new(analyzer),
+            config: Arc::new(RwLock::new(Config::default())),
+        }
+    }
+
     async fn initialize_config<P: AsRef<Path>>(&self, initialization_options: Option<&serde_json::Value>, dir: P) {
         let c = match initialization_options.map(|options| serde_json::from_value::<Config>(options.clone())) {
             None => None,

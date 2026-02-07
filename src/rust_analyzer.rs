@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
@@ -5,7 +6,7 @@ use syn::{Attribute, Fields, Item, ItemEnum, ItemStruct, ItemType, Type};
 use tokio::sync::RwLock;
 use walkdir::WalkDir;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FieldInfo {
     pub name: String,
     pub type_name: String,
@@ -21,7 +22,7 @@ impl FieldInfo {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnumVariant {
     pub name: String,
     pub fields: Vec<FieldInfo>,
@@ -30,13 +31,13 @@ pub struct EnumVariant {
     pub column: Option<usize>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum TypeKind {
     Struct(Vec<FieldInfo>),
     Enum(Vec<EnumVariant>),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TypeInfo {
     pub name: String,
     pub kind: TypeKind,
@@ -81,6 +82,96 @@ pub struct RustAnalyzer {
     type_cache: RwLock<HashMap<String, TypeInfo>>,
     type_aliases: RwLock<HashMap<String, String>>,
     initial_scan_complete: RwLock<bool>,
+}
+
+impl serde::Serialize for RustAnalyzer {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+
+        let type_cache = self
+            .type_cache
+            .try_read()
+            .map_err(|_| serde::ser::Error::custom("failed to acquire type_cache lock"))?;
+        let type_aliases = self
+            .type_aliases
+            .try_read()
+            .map_err(|_| serde::ser::Error::custom("failed to acquire type_aliases lock"))?;
+
+        let mut state = serializer.serialize_struct("RustAnalyzer", 2)?;
+        state.serialize_field("type_cache", &*type_cache)?;
+        state.serialize_field("type_aliases", &*type_aliases)?;
+        state.end()
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for RustAnalyzer {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::{self, MapAccess, Visitor};
+        use std::fmt;
+
+        #[derive(serde::Deserialize)]
+        #[serde(field_identifier, rename_all = "snake_case")]
+        enum Field {
+            TypeCache,
+            TypeAliases,
+        }
+
+        struct RustAnalyzerVisitor;
+
+        impl<'de> Visitor<'de> for RustAnalyzerVisitor {
+            type Value = RustAnalyzer;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("struct RustAnalyzer")
+            }
+
+            fn visit_map<V>(self, mut map: V) -> Result<RustAnalyzer, V::Error>
+            where
+                V: MapAccess<'de>,
+            {
+                let mut type_cache = None;
+                let mut type_aliases = None;
+
+                while let Some(key) = map.next_key()? {
+                    match key {
+                        Field::TypeCache => {
+                            if type_cache.is_some() {
+                                return Err(de::Error::duplicate_field("type_cache"));
+                            }
+                            type_cache = Some(map.next_value()?);
+                        }
+                        Field::TypeAliases => {
+                            if type_aliases.is_some() {
+                                return Err(de::Error::duplicate_field("type_aliases"));
+                            }
+                            type_aliases = Some(map.next_value()?);
+                        }
+                    }
+                }
+
+                let type_cache =
+                    type_cache.ok_or_else(|| de::Error::missing_field("type_cache"))?;
+                let type_aliases =
+                    type_aliases.ok_or_else(|| de::Error::missing_field("type_aliases"))?;
+
+                Ok(RustAnalyzer {
+                    workspace_root: RwLock::new(None),
+                    type_cache: RwLock::new(type_cache),
+                    type_aliases: RwLock::new(type_aliases),
+                    initial_scan_complete: RwLock::new(false),
+                })
+            }
+        }
+
+        const FIELDS: &[&str] = &["type_cache", "type_aliases"];
+        deserializer.deserialize_struct("RustAnalyzer", FIELDS, RustAnalyzerVisitor)
+    }
 }
 
 impl RustAnalyzer {
@@ -602,6 +693,32 @@ mod serde_attributes {
         }
 
         field_attrs
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_rust_analyzer_serialization_roundtrip() {
+        let analyzer = RustAnalyzer::new();
+        analyzer
+            .insert_type_for_test(TypeInfo {
+                name: "Test".to_string(),
+                kind: TypeKind::Struct(vec![]),
+                docs: None,
+                source_file: None,
+                line: None,
+                column: None,
+                has_default: false,
+            })
+            .await;
+
+        let json = serde_json::to_string(&analyzer).unwrap();
+        let deserialized: RustAnalyzer = serde_json::from_str(&json).unwrap();
+
+        assert!(deserialized.get_type_info("Test").await.is_some());
     }
 }
 
