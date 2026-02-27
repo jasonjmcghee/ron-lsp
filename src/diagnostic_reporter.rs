@@ -106,7 +106,12 @@ impl Diagnostic {
 
         // Convert line/col to byte offset
         let byte_offset = get_byte_offset(source, self.line as usize, self.col_start as usize);
-        let byte_end = get_byte_offset(source, self.line as usize, self.col_end as usize);
+        let mut byte_end = get_byte_offset(source, self.line as usize, self.col_end as usize);
+
+        // Ensure the label span is valid (start <= end)
+        if byte_end <= byte_offset {
+            byte_end = byte_offset + 1;
+        }
 
         Report::build(report_kind, file_path.display().to_string(), byte_offset)
             .with_message(&self.message)
@@ -134,4 +139,59 @@ fn get_byte_offset(source: &str, line: usize, col: usize) -> usize {
         byte_offset += line_text.len() + 1;
     }
     byte_offset
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(feature = "cli")]
+    #[test]
+    fn test_report_ariadne_does_not_panic_with_inverted_span() {
+        // Bug fix: when col_start > col_end (e.g. from a multi-line LSP range
+        // flattened to one line), ariadne panicked with "Label start is after its end".
+        // The guard in report_ariadne should prevent this.
+        let diag = Diagnostic {
+            line: 0,
+            col_start: 20,
+            col_end: 5, // intentionally inverted
+            severity: Severity::Error,
+            message: "test inverted span".to_string(),
+        };
+
+        let source = "    some_field: SomeType(\n        nested: 1,\n    ),\n";
+        let path = std::path::Path::new("test.ron");
+
+        // This should not panic
+        diag.report_ariadne(path, source);
+    }
+
+    #[cfg(feature = "cli")]
+    #[test]
+    fn test_report_ariadne_does_not_panic_with_zero_width_span() {
+        let diag = Diagnostic {
+            line: 0,
+            col_start: 10,
+            col_end: 10, // zero width
+            severity: Severity::Error,
+            message: "test zero width span".to_string(),
+        };
+
+        let source = "    some_field: value,\n";
+        let path = std::path::Path::new("test.ron");
+
+        // This should not panic
+        diag.report_ariadne(path, source);
+    }
+
+    #[cfg(feature = "cli")]
+    #[test]
+    fn test_get_byte_offset() {
+        let source = "line0\nline1\nline2\n";
+        assert_eq!(get_byte_offset(source, 0, 0), 0);
+        assert_eq!(get_byte_offset(source, 0, 3), 3);
+        assert_eq!(get_byte_offset(source, 1, 0), 6);
+        assert_eq!(get_byte_offset(source, 1, 2), 8);
+        assert_eq!(get_byte_offset(source, 2, 0), 12);
+    }
 }

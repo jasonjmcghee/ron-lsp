@@ -228,3 +228,24 @@ pub struct Manufacturer {
     /// Country of origin
     pub country: String,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Vessel {
+    pub name: String,
+    pub symbol: char,
+    pub color: Color,
+    pub role: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Color {
+    pub r: f32,
+    pub g: f32,
+    pub b: f32,
+    pub a: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VesselsData {
+    pub vessels: Vec<Vessel>,
+}

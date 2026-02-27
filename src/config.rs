@@ -70,6 +70,8 @@ mod tests {
 
     #[test]
     fn test_match_module_path() {
+        // Use PathBuf::from components to build platform-appropriate paths
+        let root_dir: PathBuf = ["my", "project"].iter().collect();
         let config = Config {
             types: vec![
                 TypePattern {
@@ -77,11 +79,15 @@ mod tests {
                     path: "crate::models::Post".to_string(),
                 }
             ],
-            root_dir: Some("Bobby".into()),
+            root_dir: Some(root_dir.clone()),
         };
 
-        let result = config.match_module_path(r#"MyDirectory\ron-lsp\example\data\post.ron"#);
-
+        let matching_path: PathBuf = root_dir.join("example").join("data").join("post.ron");
+        let result = config.match_module_path(&matching_path);
         assert_eq!(result, Some(&"crate::models::Post".to_string()));
+
+        let non_matching_path: PathBuf = root_dir.join("example").join("data").join("user.ron");
+        let result = config.match_module_path(&non_matching_path);
+        assert_eq!(result, None);
     }
 }
