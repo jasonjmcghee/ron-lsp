@@ -327,10 +327,18 @@ fn lsp_diagnostics_to_portable(diagnostics: &[Diagnostic]) -> Vec<diagnostic_rep
                 _ => diagnostic_reporter::Severity::Info,
             };
 
+            let col_start = d.range.start.character;
+            let col_end = if d.range.end.line > d.range.start.line || d.range.end.character <= d.range.start.character {
+                // Multi-line range or zero-width: use col_start + 1 as fallback
+                col_start + 1
+            } else {
+                d.range.end.character
+            };
+
             diagnostic_reporter::Diagnostic {
                 line: d.range.start.line,
-                col_start: d.range.start.character,
-                col_end: d.range.end.character,
+                col_start,
+                col_end,
                 severity,
                 message: d.message.clone(),
             }
@@ -428,13 +436,19 @@ async fn validate_struct_fields(
                                     if let Some(error_msg) = type_mismatch {
                                         let pos = value_node.start_position();
                                         let end_pos = value_node.end_position();
+                                        // For multi-line nodes, use end of first line
+                                        // to avoid inverted column ranges
+                                        let end_col = if end_pos.row > pos.row {
+                                            let line = content.lines().nth(pos.row)
+                                                .unwrap_or("");
+                                            line.len() as u32
+                                        } else {
+                                            end_pos.column as u32
+                                        };
                                         diagnostics.push(Diagnostic {
                                             range: Range::new(
                                                 Position::new(pos.row as u32, pos.column as u32),
-                                                Position::new(
-                                                    pos.row as u32,
-                                                    end_pos.column as u32,
-                                                ),
+                                                Position::new(pos.row as u32, end_col),
                                             ),
                                             severity: Some(DiagnosticSeverity::ERROR),
                                             message: format!("Type mismatch: {}", error_msg),
@@ -1016,11 +1030,9 @@ async fn check_type_mismatch_with_enum_validation(
 ) -> Option<String> {
     // First do basic type checking
     let basic_result = check_type_mismatch_deep(value, expected_type, content, field_name);
-    if basic_result.is_some() {
-        return basic_result;
-    }
 
-    // If the expected type is custom (not primitive), check if it's an enum and validate the variant
+    // If the expected type is a custom type, check if it's an enum and validate the variant
+    // before returning any basic mismatch (which may be a false positive for enum variants)
     if !is_primitive_type(expected_type) {
         if let Some(field_value_text) = extract_field_value_text(content, field_name) {
             let trimmed = field_value_text.trim();
@@ -1031,8 +1043,10 @@ async fn check_type_mismatch_with_enum_validation(
                     // Extract the variant name from the text
                     let variant_name = trimmed.split('(').next().unwrap_or(trimmed).trim();
 
-                    // Check if this is a valid variant
-                    if !variants.iter().any(|v| v.name == variant_name) {
+                    if variants.iter().any(|v| v.name == variant_name) {
+                        // Valid variant — suppress any basic type mismatch
+                        return None;
+                    } else {
                         return Some(format!(
                             "unknown variant '{}' for enum {}",
                             variant_name, expected_type
@@ -1041,6 +1055,11 @@ async fn check_type_mismatch_with_enum_validation(
                 }
             }
         }
+    }
+
+    // Return the basic result for non-enum types
+    if basic_result.is_some() {
+        return basic_result;
     }
 
     None
@@ -2252,5 +2271,236 @@ PostReference(Post(
             "Expected no errors for valid VesselsData. Got: {:?}",
             valid_diagnostics
         );
+    }
+
+    #[tokio::test]
+    async fn test_enum_variant_in_struct_field_not_false_positive() {
+        // Bug fix: `Detailed(length: 1)` was falsely reported as
+        // "Type mismatch: expected PostType, got Detailed" because
+        // check_type_mismatch_deep ran before checking if Detailed
+        // is a valid variant of PostType.
+        let analyzer = Arc::new(RustAnalyzer::new());
+
+        let post_type_info = TypeInfo {
+            name: "PostType".to_string(),
+            kind: TypeKind::Enum(vec![
+                EnumVariant {
+                    name: "Short".to_string(),
+                    fields: vec![],
+                    docs: None,
+                    line: None,
+                    column: None,
+                },
+                EnumVariant {
+                    name: "Long".to_string(),
+                    fields: vec![],
+                    docs: None,
+                    line: None,
+                    column: None,
+                },
+                EnumVariant {
+                    name: "Described".to_string(),
+                    fields: vec![FieldInfo {
+                        name: "0".to_string(),
+                        type_name: "String".to_string(),
+                        docs: None,
+                        line: None,
+                        column: None,
+                        has_default: false,
+                    }],
+                    docs: None,
+                    line: None,
+                    column: None,
+                },
+                EnumVariant {
+                    name: "Detailed".to_string(),
+                    fields: vec![FieldInfo {
+                        name: "length".to_string(),
+                        type_name: "usize".to_string(),
+                        docs: None,
+                        line: None,
+                        column: None,
+                        has_default: false,
+                    }],
+                    docs: None,
+                    line: None,
+                    column: None,
+                },
+            ]),
+            docs: None,
+            source_file: None,
+            line: None,
+            column: None,
+            has_default: false,
+        };
+        analyzer.insert_type_for_test(post_type_info).await;
+
+        let type_info = TypeInfo {
+            name: "Post".to_string(),
+            kind: TypeKind::Struct(vec![
+                FieldInfo {
+                    name: "id".to_string(),
+                    type_name: "u32".to_string(),
+                    docs: None,
+                    line: None,
+                    column: None,
+                    has_default: false,
+                },
+                FieldInfo {
+                    name: "post_type".to_string(),
+                    type_name: "PostType".to_string(),
+                    docs: None,
+                    line: None,
+                    column: None,
+                    has_default: false,
+                },
+            ]),
+            docs: None,
+            source_file: None,
+            line: None,
+            column: None,
+            has_default: false,
+        };
+
+        // Single-line variant should not be a false positive
+        let content = r#"Post(
+    id: 1,
+    post_type: Detailed( length: 1 ),
+)"#;
+        let diagnostics = validate_ron_with_analyzer(content, &type_info, analyzer.clone()).await;
+        assert!(
+            !diagnostics.iter().any(|d| d.message.contains("expected PostType")),
+            "Detailed is a valid PostType variant, should not be a type mismatch. Got: {:?}",
+            diagnostics
+        );
+
+        // Multi-line variant should also not be a false positive
+        let content = r#"Post(
+    id: 1,
+    post_type: Detailed(
+        length: 1,
+    ),
+)"#;
+        let diagnostics = validate_ron_with_analyzer(content, &type_info, analyzer.clone()).await;
+        assert!(
+            !diagnostics.iter().any(|d| d.message.contains("expected PostType")),
+            "Multi-line Detailed should not be a type mismatch. Got: {:?}",
+            diagnostics
+        );
+
+        // Invalid variant should still be caught
+        let content = r#"Post(
+    id: 1,
+    post_type: Bogus( length: 1 ),
+)"#;
+        let diagnostics = validate_ron_with_analyzer(content, &type_info, analyzer.clone()).await;
+        assert!(
+            diagnostics.iter().any(|d| d.message.contains("unknown variant 'Bogus'")),
+            "Bogus is not a valid PostType variant. Got: {:?}",
+            diagnostics
+        );
+
+        // Unit variant should work too
+        let content = r#"Post(
+    id: 1,
+    post_type: Short,
+)"#;
+        let diagnostics = validate_ron_with_analyzer(content, &type_info, analyzer).await;
+        assert!(
+            !diagnostics.iter().any(|d| d.message.contains("expected PostType")),
+            "Short is a valid PostType variant. Got: {:?}",
+            diagnostics
+        );
+    }
+
+    #[tokio::test]
+    async fn test_multiline_value_node_diagnostic_has_valid_range() {
+        // Bug fix: when a value node spans multiple lines, the diagnostic
+        // range used end_pos.column from a different row, causing
+        // col_start > col_end and a panic in ariadne.
+        let analyzer = Arc::new(RustAnalyzer::new());
+
+        let type_info = TypeInfo {
+            name: "Wrapper".to_string(),
+            kind: TypeKind::Struct(vec![FieldInfo {
+                name: "value".to_string(),
+                type_name: "CustomType".to_string(),
+                docs: None,
+                line: None,
+                column: None,
+                has_default: false,
+            }]),
+            docs: None,
+            source_file: None,
+            line: None,
+            column: None,
+            has_default: false,
+        };
+
+        // Multi-line value that would cause inverted range
+        let content = r#"Wrapper(
+    value: SomeOtherType(
+        nested: 1,
+    ),
+)"#;
+        let diagnostics = validate_ron_with_analyzer(content, &type_info, analyzer).await;
+        // Verify all diagnostics have valid ranges (start <= end)
+        for d in &diagnostics {
+            assert!(
+                d.range.start.line < d.range.end.line
+                    || (d.range.start.line == d.range.end.line
+                        && d.range.start.character <= d.range.end.character),
+                "Diagnostic range is inverted: start={:?} end={:?} msg={}",
+                d.range.start,
+                d.range.end,
+                d.message
+            );
+        }
+    }
+
+    #[cfg(feature = "cli")]
+    #[test]
+    fn test_lsp_diagnostics_to_portable_multiline_range() {
+        // Bug fix: when an LSP diagnostic spans multiple lines,
+        // the portable diagnostic's col_end came from end.character
+        // on a different line, which could be less than col_start.
+        let multiline_diag = Diagnostic {
+            range: Range::new(
+                Position::new(5, 20),  // start: line 5, col 20
+                Position::new(8, 5),   // end: line 8, col 5
+            ),
+            severity: Some(DiagnosticSeverity::ERROR),
+            message: "some error".to_string(),
+            ..Default::default()
+        };
+
+        let result = lsp_diagnostics_to_portable(&[multiline_diag]);
+        assert_eq!(result.len(), 1);
+        assert!(
+            result[0].col_end > result[0].col_start,
+            "col_end ({}) should be greater than col_start ({}) for multi-line diagnostics",
+            result[0].col_end,
+            result[0].col_start,
+        );
+    }
+
+    #[cfg(feature = "cli")]
+    #[test]
+    fn test_lsp_diagnostics_to_portable_single_line() {
+        // Single-line diagnostics should pass through col_end unchanged
+        let single_line_diag = Diagnostic {
+            range: Range::new(
+                Position::new(3, 10),
+                Position::new(3, 25),
+            ),
+            severity: Some(DiagnosticSeverity::ERROR),
+            message: "some error".to_string(),
+            ..Default::default()
+        };
+
+        let result = lsp_diagnostics_to_portable(&[single_line_diag]);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].col_start, 10);
+        assert_eq!(result[0].col_end, 25);
     }
 }
