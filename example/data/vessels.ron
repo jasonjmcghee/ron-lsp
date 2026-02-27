@@ -1,0 +1,12 @@
+/* @[crate::models::VesselsData] */
+
+VesselsData(
+    vessels: [
+        Vessel(
+            role: "General population",
+        ),
+        (
+            role: "Industrial labor",
+        )
+    ]
+)
