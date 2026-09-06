@@ -68,6 +68,8 @@ The LSP will:
 5. Support `Default` trait for optional field omission
 6. Provide code actions for inserting either required or missing fields, when applicable
 
+If you have a custom `Deserialize` impl (or use `#[serde(transparent)]`, `from`, or `try_from`), it'll skip the field-based checks for that type. So a newtype that reads from a string won't get flagged for not looking like a struct. It still checks RON syntax, but it can't check whatever your custom deserializer does.
+
 ### Example
 
 **src/models/user.rs:**

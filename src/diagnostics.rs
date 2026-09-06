@@ -45,6 +45,10 @@ pub async fn validate_ron_with_analyzer(
         return diagnostics;
     }
 
+    if analyzer.has_custom_deserializer(&type_info.name).await {
+        return diagnostics;
+    }
+
     match &type_info.kind {
         TypeKind::Struct(fields) => {
             diagnostics.extend(
@@ -565,6 +569,9 @@ async fn validate_field_value_node<'a>(
     analyzer: &Arc<RustAnalyzer>,
 ) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
+    if analyzer.has_custom_deserializer(field_type).await {
+        return diagnostics;
+    }
     let field_type_normalized = field_type.replace(" ", "");
 
     if let Some(inner_type) = extract_inner_type(&field_type_normalized, "Vec<") {
@@ -620,6 +627,9 @@ async fn validate_node_with_type_info<'a>(
 ) -> Vec<Diagnostic> {
     use crate::ts_utils;
     let mut diagnostics = Vec::new();
+    if analyzer.has_custom_deserializer(&type_info.name).await {
+        return diagnostics;
+    }
 
     match &type_info.kind {
         TypeKind::Struct(fields) => {
@@ -1029,6 +1039,10 @@ async fn check_type_mismatch_with_enum_validation(
     field_name: &str,
     analyzer: &Arc<RustAnalyzer>,
 ) -> Option<String> {
+    if analyzer.has_custom_deserializer(expected_type).await {
+        return None;
+    }
+
     // First do basic type checking
     let basic_result = check_type_mismatch_deep(value, expected_type, content, field_name);
 
@@ -1449,6 +1463,89 @@ fn simplify_ron_error(error_msg: &str) -> String {
 mod tests {
     use super::*;
     use crate::rust_analyzer::{EnumVariant, FieldInfo};
+
+    #[tokio::test]
+    async fn custom_deserializers_do_not_require_struct_shaped_values() {
+        let root = std::env::temp_dir().join(format!("ron-custom-serde-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        let source = r#"
+            struct Special(String);
+            impl<'de> serde::Deserialize<'de> for Special {
+                fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+                    String::deserialize(d).map(Special)
+                }
+            }
+            #[derive(serde::Deserialize)]
+            #[serde(rename = "Renamed", transparent)]
+            struct Transparent(String);
+            #[derive(serde::Deserialize)]
+            #[serde(from = "String")]
+            struct Converted { value: String }
+            #[derive(serde::Deserialize)]
+            #[serde(try_from = "String")]
+            enum ConvertedEnum { Value(String) }
+            #[derive(serde::Deserialize)]
+            struct Ordinary { value: String }
+            type Alias = Special;
+            struct Data {
+                special: Special,
+                transparent: Transparent,
+                converted: Converted,
+                converted_enum: ConvertedEnum,
+                optional: Option<Special>,
+                values: Vec<Special>,
+                alias: Alias,
+                count: u32,
+                ordinary: Ordinary,
+            }
+        "#;
+        let file = root.join("src/lib.rs");
+        std::fs::write(&file, source).unwrap();
+        let analyzer = Arc::new(RustAnalyzer::new());
+        analyzer.set_workspace_root(&root).await;
+        let info = analyzer.get_type_info("Data").await.unwrap();
+        let content = r#"Data(
+            special: "a",
+            transparent: "b",
+            converted: "c",
+            converted_enum: "d",
+            optional: Some("e"),
+            values: ["f", "g"],
+            alias: "h",
+            count: 1,
+            ordinary: Ordinary(value: "i"),
+        )"#;
+        let diagnostics = validate_ron_with_analyzer(content, &info, analyzer.clone()).await;
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        for (from, to) in [
+            ("count: 1", "count: \"wrong\""),
+            ("Ordinary(value: \"i\")", "Ordinary()"),
+        ] {
+            let diagnostics =
+                validate_ron_with_analyzer(&content.replace(from, to), &info, analyzer.clone())
+                    .await;
+            assert!(
+                !diagnostics.is_empty(),
+                "ordinary type checks must remain enabled"
+            );
+        }
+        let special = analyzer.get_type_info("Special").await.unwrap();
+        assert!(
+            validate_ron_with_analyzer("\"root\"", &special, analyzer.clone())
+                .await
+                .is_empty()
+        );
+        assert!(
+            !validate_ron_with_analyzer("\"unterminated", &special, analyzer.clone())
+                .await
+                .is_empty()
+        );
+        // Rescanning must forget implementations that were removed.
+        std::fs::write(file, "struct Special(String);").unwrap();
+        analyzer.scan_workspace().await;
+        assert!(!analyzer.has_custom_deserializer("Special").await);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[tokio::test]
     async fn test_enum_variant_validation() {
