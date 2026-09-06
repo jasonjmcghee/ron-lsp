@@ -35,6 +35,14 @@ You can optionally pass a file or folder. (e.g. `ron-lsp check crates/sub-crate`
 
 It will use the nearest `Cargo.toml` starting from the resolved `.ron` file.
 
+You can also format files in place:
+
+```bash
+ron-lsp format
+```
+
+Same deal with the optional path. (e.g. `ron-lsp format crates/sub-crate` - it'll format all `.ron` files from that point.) No annotations needed, and it'll keep things like `#![enable(implicit_some)]`.
+
 ## Usage
 
 ### Type Annotation Format
