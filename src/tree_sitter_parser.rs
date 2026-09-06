@@ -49,9 +49,7 @@ pub fn find_type_context_at_position(content: &str, position: Position) -> Vec<T
         loop {
             if current.kind() == "struct" {
                 if let Some(type_name) = extract_struct_name(&current, content) {
-                    contexts.push(TypeContext {
-                        type_name,
-                    });
+                    contexts.push(TypeContext { type_name });
                 }
             }
 
@@ -241,12 +239,22 @@ fn visit_fields(node: &Node, content: &str, locations: &mut Vec<VariantFieldLoca
     if node.kind() == "struct" {
         if let Some(variant_name) = extract_struct_name(node, content) {
             // This is a named struct, check if it's a variant (uppercase start)
-            if variant_name.chars().next().map_or(false, |c| c.is_uppercase()) {
+            if variant_name
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_uppercase())
+            {
                 // Look for the containing field by checking parent
                 let containing_field_name = find_parent_field_name(node, content);
 
                 // Now collect all fields inside this variant
-                collect_fields_in_node(node, content, &variant_name, &containing_field_name, locations);
+                collect_fields_in_node(
+                    node,
+                    content,
+                    &variant_name,
+                    &containing_field_name,
+                    locations,
+                );
             }
         }
     }
@@ -261,22 +269,17 @@ fn visit_fields(node: &Node, content: &str, locations: &mut Vec<VariantFieldLoca
 /// Find the parent field name of a node
 fn find_parent_field_name(node: &Node, content: &str) -> Option<String> {
     let mut current = *node;
-    loop {
-        match current.parent() {
-            Some(parent) => {
-                if parent.kind() == "field" {
-                    if let Some(field_name_node) = parent.child(0) {
-                        if field_name_node.kind() == "identifier" {
-                            if let Ok(name) = field_name_node.utf8_text(content.as_bytes()) {
-                                return Some(name.to_string());
-                            }
-                        }
+    while let Some(parent) = current.parent() {
+        if parent.kind() == "field" {
+            if let Some(field_name_node) = parent.child(0) {
+                if field_name_node.kind() == "identifier" {
+                    if let Ok(name) = field_name_node.utf8_text(content.as_bytes()) {
+                        return Some(name.to_string());
                     }
                 }
-                current = parent;
             }
-            None => break,
         }
+        current = parent;
     }
     None
 }
@@ -297,7 +300,9 @@ fn collect_fields_in_node(
             // Extract field name
             let field_at_position = if let Some(field_name_node) = child.child(0) {
                 if field_name_node.kind() == "identifier" {
-                    field_name_node.utf8_text(content.as_bytes()).ok()
+                    field_name_node
+                        .utf8_text(content.as_bytes())
+                        .ok()
                         .map(|s| s.to_string())
                 } else {
                     None
@@ -317,7 +322,13 @@ fn collect_fields_in_node(
         }
 
         // Recurse for nested structures
-        collect_fields_in_node(&child, content, variant_name, containing_field_name, locations);
+        collect_fields_in_node(
+            &child,
+            content,
+            variant_name,
+            containing_field_name,
+            locations,
+        );
     }
 }
 
@@ -346,7 +357,11 @@ pub fn extract_fields_from_ron(content: &str) -> Vec<String> {
 }
 
 /// Collect only direct child field names from a struct node (not recursively)
-fn collect_direct_field_names(node: &Node, content: &str, fields: &mut std::collections::HashSet<String>) {
+fn collect_direct_field_names(
+    node: &Node,
+    content: &str,
+    fields: &mut std::collections::HashSet<String>,
+) {
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
         if child.kind() == "field" {

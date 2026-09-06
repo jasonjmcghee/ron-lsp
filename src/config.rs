@@ -1,7 +1,7 @@
-use std::fs;
-use std::path::{Path, PathBuf};
 use globset::{Glob, GlobMatcher};
 use serde::{Deserialize, Deserializer};
+use std::fs;
+use std::path::{Path, PathBuf};
 
 pub const CONFIG_FILE_NAME: &str = "ron.toml";
 
@@ -40,13 +40,15 @@ impl Config {
             .and_then(|root| file_path.strip_prefix(root).ok())
             .unwrap_or(file_path);
 
-        self.types.iter().find_map(|TypePattern { glob, path }| {
-            if glob.is_match(rel) {
-                Some(path)
-            } else {
-                None
-            }
-        })
+        self.types.iter().find_map(
+            |TypePattern { glob, path }| {
+                if glob.is_match(rel) {
+                    Some(path)
+                } else {
+                    None
+                }
+            },
+        )
     }
 }
 
@@ -58,7 +60,10 @@ struct TypePattern {
     path: String,
 }
 
-fn deserialize_glob<'de, D>(deserializer: D) -> Result<GlobMatcher, D::Error> where D: Deserializer<'de> {
+fn deserialize_glob<'de, D>(deserializer: D) -> Result<GlobMatcher, D::Error>
+where
+    D: Deserializer<'de>,
+{
     String::deserialize(deserializer)
         .and_then(|glob| Glob::new(&glob).map_err(serde::de::Error::custom))
         .map(|glob| glob.compile_matcher())
@@ -73,12 +78,10 @@ mod tests {
         // Use PathBuf::from components to build platform-appropriate paths
         let root_dir: PathBuf = ["my", "project"].iter().collect();
         let config = Config {
-            types: vec![
-                TypePattern {
-                    glob: Glob::new("**/post.ron").unwrap().compile_matcher(),
-                    path: "crate::models::Post".to_string(),
-                }
-            ],
+            types: vec![TypePattern {
+                glob: Glob::new("**/post.ron").unwrap().compile_matcher(),
+                path: "crate::models::Post".to_string(),
+            }],
             root_dir: Some(root_dir.clone()),
         };
 

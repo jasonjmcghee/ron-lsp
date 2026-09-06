@@ -328,7 +328,9 @@ fn lsp_diagnostics_to_portable(diagnostics: &[Diagnostic]) -> Vec<diagnostic_rep
             };
 
             let col_start = d.range.start.character;
-            let col_end = if d.range.end.line > d.range.start.line || d.range.end.character <= d.range.start.character {
+            let col_end = if d.range.end.line > d.range.start.line
+                || d.range.end.character <= d.range.start.character
+            {
                 // Multi-line range or zero-width: use col_start + 1 as fallback
                 col_start + 1
             } else {
@@ -412,7 +414,7 @@ async fn validate_struct_fields(
 
                             // Primitive / surface-level type check (uses RON-parsed typed values).
                             // Positions come directly from the tree-sitter node — no line adjustment.
-                            if let Some(ref map) = ron_map {
+                            if let Some(map) = ron_map {
                                 if let Some(field_value) =
                                     map.get(&Value::String(field_name.to_string()))
                                 {
@@ -439,8 +441,7 @@ async fn validate_struct_fields(
                                         // For multi-line nodes, use end of first line
                                         // to avoid inverted column ranges
                                         let end_col = if end_pos.row > pos.row {
-                                            let line = content.lines().nth(pos.row)
-                                                .unwrap_or("");
+                                            let line = content.lines().nth(pos.row).unwrap_or("");
                                             line.len() as u32
                                         } else {
                                             end_pos.column as u32
@@ -662,7 +663,7 @@ async fn validate_node_with_type_info<'a>(
                 if !type_info.has_default {
                     for field in fields {
                         if !present_fields.contains(&field.name) && !field.is_optional() {
-                            let target_node = node.child(0).unwrap_or_else(|| *node);
+                            let target_node = node.child(0).unwrap_or(*node);
                             let range = ts_utils::node_to_lsp_range(&target_node);
                             diagnostics.push(Diagnostic {
                                 range,
@@ -1142,10 +1143,7 @@ fn extract_field_value_text(content: &str, field_name: &str) -> Option<String> {
             let root = tree.root_node();
             let mut cursor = root.walk();
             let result = root.children(&mut cursor).find(|n| n.kind() == "struct");
-            match result {
-                Some(s) => s,
-                None => return None,
-            }
+            result?
         } else {
             main_value
         };
@@ -1298,10 +1296,8 @@ fn check_type_mismatch(value: &Value, expected_type: &str) -> Option<String> {
                 return Some(format!("expected {}, got None", display_type));
             }
         }
-        Value::Unit => {
-            if clean_type != "()" && clean_type != "unit" {
-                return Some(format!("expected {}, got ()", display_type));
-            }
+        Value::Unit if clean_type != "()" && clean_type != "unit" => {
+            return Some(format!("expected {}, got ()", display_type));
         }
         _ => {}
     }
@@ -2369,7 +2365,9 @@ PostReference(Post(
 )"#;
         let diagnostics = validate_ron_with_analyzer(content, &type_info, analyzer.clone()).await;
         assert!(
-            !diagnostics.iter().any(|d| d.message.contains("expected PostType")),
+            !diagnostics
+                .iter()
+                .any(|d| d.message.contains("expected PostType")),
             "Detailed is a valid PostType variant, should not be a type mismatch. Got: {:?}",
             diagnostics
         );
@@ -2383,7 +2381,9 @@ PostReference(Post(
 )"#;
         let diagnostics = validate_ron_with_analyzer(content, &type_info, analyzer.clone()).await;
         assert!(
-            !diagnostics.iter().any(|d| d.message.contains("expected PostType")),
+            !diagnostics
+                .iter()
+                .any(|d| d.message.contains("expected PostType")),
             "Multi-line Detailed should not be a type mismatch. Got: {:?}",
             diagnostics
         );
@@ -2395,7 +2395,9 @@ PostReference(Post(
 )"#;
         let diagnostics = validate_ron_with_analyzer(content, &type_info, analyzer.clone()).await;
         assert!(
-            diagnostics.iter().any(|d| d.message.contains("unknown variant 'Bogus'")),
+            diagnostics
+                .iter()
+                .any(|d| d.message.contains("unknown variant 'Bogus'")),
             "Bogus is not a valid PostType variant. Got: {:?}",
             diagnostics
         );
@@ -2407,7 +2409,9 @@ PostReference(Post(
 )"#;
         let diagnostics = validate_ron_with_analyzer(content, &type_info, analyzer).await;
         assert!(
-            !diagnostics.iter().any(|d| d.message.contains("expected PostType")),
+            !diagnostics
+                .iter()
+                .any(|d| d.message.contains("expected PostType")),
             "Short is a valid PostType variant. Got: {:?}",
             diagnostics
         );
@@ -2466,8 +2470,8 @@ PostReference(Post(
         // on a different line, which could be less than col_start.
         let multiline_diag = Diagnostic {
             range: Range::new(
-                Position::new(5, 20),  // start: line 5, col 20
-                Position::new(8, 5),   // end: line 8, col 5
+                Position::new(5, 20), // start: line 5, col 20
+                Position::new(8, 5),  // end: line 8, col 5
             ),
             severity: Some(DiagnosticSeverity::ERROR),
             message: "some error".to_string(),
@@ -2489,10 +2493,7 @@ PostReference(Post(
     fn test_lsp_diagnostics_to_portable_single_line() {
         // Single-line diagnostics should pass through col_end unchanged
         let single_line_diag = Diagnostic {
-            range: Range::new(
-                Position::new(3, 10),
-                Position::new(3, 25),
-            ),
+            range: Range::new(Position::new(3, 10), Position::new(3, 25)),
             severity: Some(DiagnosticSeverity::ERROR),
             message: "some error".to_string(),
             ..Default::default()

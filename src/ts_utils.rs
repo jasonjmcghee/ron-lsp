@@ -1,6 +1,5 @@
 /// Tree-sitter utilities for RON LSP
 /// This module provides high-level helpers for working with tree-sitter AST nodes
-
 use tower_lsp::lsp_types::{Position, Range};
 use tree_sitter::{Node, Parser, Tree};
 
@@ -110,7 +109,9 @@ pub fn children_by_kind<'a>(node: &Node<'a>, kind: &str) -> Vec<Node<'a>> {
 #[cfg(test)]
 pub fn child_by_kind<'a>(node: &Node<'a>, kind: &str) -> Option<Node<'a>> {
     let mut cursor = node.walk();
-    let result = node.children(&mut cursor).find(|child| child.kind() == kind);
+    let result = node
+        .children(&mut cursor)
+        .find(|child| child.kind() == kind);
     result
 }
 
@@ -174,10 +175,7 @@ pub fn field_value<'a>(node: &Node<'a>) -> Option<Node<'a>> {
     }
 
     // Fallback: last child that's not a comma
-    children.iter()
-        .rev()
-        .find(|c| c.is_named())
-        .copied()
+    children.iter().rev().find(|c| c.is_named()).copied()
 }
 
 /// Find all fields in a struct node (non-recursive, only direct children)
@@ -227,7 +225,8 @@ pub fn find_main_value(tree: &Tree) -> Option<Node<'_>> {
                 && kind != "extensions"
                 && kind != "extension"
                 && kind != "line_comment"
-                && kind != "block_comment" {
+                && kind != "block_comment"
+            {
                 return Some(child);
             }
         }
@@ -245,7 +244,7 @@ pub fn is_empty_structure(node: &Node, _content: &str) -> bool {
             let has_children = node.named_children(&mut cursor).next().is_some();
             !has_children
         }
-        _ => false
+        _ => false,
     }
 }
 
@@ -325,9 +324,10 @@ pub fn find_potential_variants<'a>(tree: &'a Tree, content: &str) -> Vec<Node<'a
 fn collect_potential_variants<'a>(node: &Node<'a>, content: &str, results: &mut Vec<Node<'a>>) {
     if node.kind() == "identifier" {
         if let Some(text) = node_text(node, content) {
-            if text.chars().next().map_or(false, |c| c.is_uppercase()) {
+            if text.chars().next().is_some_and(|c| c.is_uppercase()) {
                 // Check if this is not a field name (field names are first child of field nodes)
-                let is_field_name = node.parent()
+                let is_field_name = node
+                    .parent()
                     .map(|p| p.kind() == "field" && p.child(0).map(|c| c.id()) == Some(node.id()))
                     .unwrap_or(false);
 
@@ -472,7 +472,11 @@ mod tests {
 
                 let mut cursor = main.walk();
                 for child in main.children(&mut cursor) {
-                    println!("  Child: kind='{}' is_named={}", child.kind(), child.is_named());
+                    println!(
+                        "  Child: kind='{}' is_named={}",
+                        child.kind(),
+                        child.is_named()
+                    );
                 }
 
                 if let Some(name) = struct_name(&main, content) {

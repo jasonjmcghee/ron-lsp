@@ -1,13 +1,13 @@
 mod annotation_parser;
 mod code_actions;
 mod completion;
+mod config;
 mod diagnostic_reporter;
 mod diagnostics;
 mod format;
 mod rust_analyzer;
 mod tree_sitter_parser;
 mod ts_utils;
-mod config;
 
 use crate::config::{Config, CONFIG_FILE_NAME};
 use std::collections::HashMap;
@@ -44,8 +44,14 @@ impl Backend {
         }
     }
 
-    async fn initialize_config<P: AsRef<Path>>(&self, initialization_options: Option<&serde_json::Value>, dir: P) {
-        let c = match initialization_options.map(|options| serde_json::from_value::<Config>(options.clone())) {
+    async fn initialize_config<P: AsRef<Path>>(
+        &self,
+        initialization_options: Option<&serde_json::Value>,
+        dir: P,
+    ) {
+        let c = match initialization_options
+            .map(|options| serde_json::from_value::<Config>(options.clone()))
+        {
             None => None,
             Some(Ok(c)) => Some(c),
             Some(Err(err)) => {
@@ -63,7 +69,8 @@ impl Backend {
             c
         } else {
             self.load_config_from_file(dir).await.ok()
-        }.unwrap_or_default();
+        }
+        .unwrap_or_default();
 
         let mut config = self.config.write().await;
         *config = c;
@@ -79,21 +86,19 @@ impl Backend {
                     )
                     .await;
                 self.client
-                    .log_message(
-                        MessageType::INFO,
-                        format!("{config:?}"),
-                    )
+                    .log_message(MessageType::INFO, format!("{config:?}"))
                     .await;
                 Ok(config)
-            },
+            }
             Ok(None) => {
                 self.client
                     .log_message(
                         MessageType::INFO,
                         format!("No {CONFIG_FILE_NAME} config file found."),
-                    ).await;
+                    )
+                    .await;
                 Ok(Config::default())
-            },
+            }
             Err(err) => {
                 self.client
                     .log_message(
@@ -113,27 +118,26 @@ impl Backend {
                 let file_path = uri.to_file_path().ok()?;
                 let config = self.config.read().await;
                 config.match_module_path(&file_path).cloned()
-            },
+            }
         }
     }
 
     async fn register_config_file_watching(&self) -> anyhow::Result<()> {
         let options = DidChangeWatchedFilesRegistrationOptions {
             watchers: vec![FileSystemWatcher {
-                glob_pattern: GlobPattern::String(format!("**/{CONFIG_FILE_NAME}").into()),
+                glob_pattern: GlobPattern::String(format!("**/{CONFIG_FILE_NAME}")),
                 kind: None,
             }],
         };
 
-         let r = Ok(self.client.register_capability(
-            vec![
-                Registration {
-                    id: "ron-toml-watcher".to_string(),
-                    method: "workspace/didChangeWatchedFiles".to_string(),
-                    register_options: Some(serde_json::to_value(options)?)
-                }
-            ]
-        ).await?);
+        let r = Ok(self
+            .client
+            .register_capability(vec![Registration {
+                id: "ron-toml-watcher".to_string(),
+                method: "workspace/didChangeWatchedFiles".to_string(),
+                register_options: Some(serde_json::to_value(options)?),
+            }])
+            .await?);
 
         if r.is_ok() {
             self.client
@@ -160,7 +164,10 @@ impl Backend {
         self.client
             .log_message(
                 MessageType::INFO,
-                format!("{CONFIG_FILE_NAME} changed, reloading config at {}.", dir.display()),
+                format!(
+                    "{CONFIG_FILE_NAME} changed, reloading config at {}.",
+                    dir.display()
+                ),
             )
             .await;
 
@@ -169,10 +176,7 @@ impl Backend {
             *config = c;
 
             self.client
-                .log_message(
-                    MessageType::INFO,
-                    "New configuration applied",
-                )
+                .log_message(MessageType::INFO, "New configuration applied")
                 .await;
         }
     }
@@ -216,19 +220,19 @@ impl LanguageServer for Backend {
     async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
         // Get workspace root
         let root = if let Some(workspace_folders) = &params.workspace_folders {
-            if let Some(folder) = workspace_folders.first() {
-                Some(folder.uri.to_file_path().unwrap())
-            } else {
-                None
-            }
-        } else if let Some(root_uri) = &params.root_uri {
-             Some(root_uri.to_file_path().unwrap())
+            workspace_folders
+                .first()
+                .map(|folder| folder.uri.to_file_path().unwrap())
         } else {
-            None
+            params
+                .root_uri
+                .as_ref()
+                .map(|root_uri| root_uri.to_file_path().unwrap())
         };
 
         if let Some(root) = root {
-            self.initialize_config(params.initialization_options.as_ref(), &root).await;
+            self.initialize_config(params.initialization_options.as_ref(), &root)
+                .await;
 
             self.client
                 .log_message(
@@ -283,7 +287,9 @@ impl LanguageServer for Backend {
             .log_message(MessageType::INFO, "RON LSP server initialized!")
             .await;
 
-        self.register_config_file_watching().await.expect("failed to register config file watching");
+        self.register_config_file_watching()
+            .await
+            .expect("failed to register config file watching");
     }
 
     async fn shutdown(&self) -> Result<()> {
@@ -292,7 +298,9 @@ impl LanguageServer for Backend {
 
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
         let content = params.text_document.text;
-        let type_annotation = self.get_type_annotation(&content, &params.text_document.uri).await;
+        let type_annotation = self
+            .get_type_annotation(&content, &params.text_document.uri)
+            .await;
         let uri = params.text_document.uri.to_string();
 
         self.documents.write().await.insert(
@@ -312,7 +320,9 @@ impl LanguageServer for Backend {
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
         if let Some(change) = params.content_changes.into_iter().next() {
             let content = change.text;
-            let type_annotation = self.get_type_annotation(&content, &params.text_document.uri).await;
+            let type_annotation = self
+                .get_type_annotation(&content, &params.text_document.uri)
+                .await;
             let uri = params.text_document.uri.to_string();
 
             self.documents.write().await.insert(
@@ -330,17 +340,22 @@ impl LanguageServer for Backend {
         }
     }
 
-    async fn did_change_watched_files(&self, DidChangeWatchedFilesParams { changes, .. }: DidChangeWatchedFilesParams) {
+    async fn did_change_watched_files(
+        &self,
+        DidChangeWatchedFilesParams { changes, .. }: DidChangeWatchedFilesParams,
+    ) {
         for FileEvent { uri, .. } in changes.iter() {
-            let Some(file_name) = uri.to_file_path()
+            let Some(file_name) = uri
+                .to_file_path()
                 .ok()
-                .and_then(|path| path.file_name().map(ToOwned::to_owned)) else {
+                .and_then(|path| path.file_name().map(ToOwned::to_owned))
+            else {
                 continue;
             };
 
             if file_name == Path::new(CONFIG_FILE_NAME).file_name().unwrap() {
                 self.config_file_changed().await;
-                return
+                return;
             }
 
             self.client.log_message(MessageType::WARNING, format!("Got a workspace/didChangeWatchedFiles notification for {}, but it is not implemented", file_name.display())).await;
