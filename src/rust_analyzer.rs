@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use syn::{Attribute, Fields, Item, ItemEnum, ItemStruct, ItemType, Type};
@@ -81,6 +81,7 @@ pub struct RustAnalyzer {
     type_cache: RwLock<HashMap<String, TypeInfo>>,
     type_aliases: RwLock<HashMap<String, String>>,
     initial_scan_complete: RwLock<bool>,
+    custom_deserializers: RwLock<HashSet<String>>,
 }
 
 impl RustAnalyzer {
@@ -90,6 +91,7 @@ impl RustAnalyzer {
             type_cache: RwLock::new(HashMap::new()),
             type_aliases: RwLock::new(HashMap::new()),
             initial_scan_complete: RwLock::new(false),
+            custom_deserializers: RwLock::new(HashSet::new()),
         }
     }
 
@@ -113,6 +115,8 @@ impl RustAnalyzer {
         let mut type_cache = self.type_cache.write().await;
         let mut type_aliases = self.type_aliases.write().await;
 
+        let mut custom_deserializers = HashSet::new();
+
         // Find all .rs files in the workspace
         for entry in WalkDir::new(&root)
             .follow_links(true)
@@ -122,6 +126,11 @@ impl RustAnalyzer {
         {
             if let Ok(content) = fs::read_to_string(entry.path()) {
                 if let Ok(syntax_tree) = syn::parse_file(&content) {
+                    collect_custom_deserializers(
+                        &syntax_tree.items,
+                        &self.file_path_to_module_path(entry.path()),
+                        &mut custom_deserializers,
+                    );
                     self.extract_types_from_file(
                         &syntax_tree,
                         entry.path(),
@@ -131,6 +140,7 @@ impl RustAnalyzer {
                 }
             }
         }
+        *self.custom_deserializers.write().await = custom_deserializers;
     }
 
     fn extract_types_from_file(
@@ -506,6 +516,42 @@ impl RustAnalyzer {
         None
     }
 
+    /// Custom Deserialize implementations and Serde conversions define their own
+    /// wire format. Static field layout cannot validate that representation.
+    pub async fn has_custom_deserializer(&self, type_name: &str) -> bool {
+        let mut inner = type_name.replace(' ', "");
+        let mut visited = HashSet::new();
+        while visited.insert(inner.clone()) {
+            let wrapper = ["Option<", "Vec<", "Box<", "Rc<", "Arc<"]
+                .into_iter()
+                .find(|prefix| inner.starts_with(prefix));
+            if let Some(prefix) = wrapper.filter(|_| inner.ends_with('>')) {
+                inner = inner[prefix.len()..inner.len() - 1].to_string();
+                continue;
+            }
+            let aliases = self.type_aliases.read().await;
+            let target = aliases.get(&inner).or_else(|| {
+                let mut matches = aliases
+                    .iter()
+                    .filter(|(name, _)| name.ends_with(&format!("::{inner}")));
+                let (_, target) = matches.next()?;
+                if matches.next().is_none() {
+                    Some(target)
+                } else {
+                    None
+                }
+            });
+            match target {
+                Some(target) => inner = target.replace(' ', ""),
+                None => break,
+            }
+        }
+        if let Some(info) = self.get_type_info(&inner).await {
+            return self.custom_deserializers.read().await.contains(&info.name);
+        }
+        false
+    }
+
     /// Get all types from the workspace
     pub async fn get_all_types(&self) -> Vec<TypeInfo> {
         let cache = self.type_cache.read().await;
@@ -604,4 +650,79 @@ mod serde_attributes {
 
         field_attrs
     }
+}
+
+fn collect_custom_deserializers(items: &[Item], prefix: &str, result: &mut HashSet<String>) {
+    let qualify = |name: &str| {
+        if prefix.is_empty() {
+            name.to_string()
+        } else {
+            format!("{prefix}::{name}")
+        }
+    };
+    for item in items {
+        match item {
+            Item::Impl(item)
+                if item.trait_.as_ref().is_some_and(|(_, path, _)| {
+                    path.segments
+                        .last()
+                        .is_some_and(|segment| segment.ident == "Deserialize")
+                }) =>
+            {
+                if let Type::Path(ty) = item.self_ty.as_ref() {
+                    let name = ty
+                        .path
+                        .segments
+                        .iter()
+                        .map(|s| s.ident.to_string())
+                        .collect::<Vec<_>>()
+                        .join("::");
+                    result.insert(if name.starts_with("crate::") {
+                        name
+                    } else {
+                        qualify(&name)
+                    });
+                }
+            }
+            Item::Struct(item) if has_serde_conversion(&item.attrs) => {
+                result.insert(qualify(&item.ident.to_string()));
+            }
+            Item::Enum(item) if has_serde_conversion(&item.attrs) => {
+                result.insert(qualify(&item.ident.to_string()));
+            }
+            Item::Mod(item) => {
+                if let Some((_, items)) = &item.content {
+                    collect_custom_deserializers(items, &qualify(&item.ident.to_string()), result);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn has_serde_conversion(attrs: &[Attribute]) -> bool {
+    attrs
+        .iter()
+        .filter(|attr| attr.path().is_ident("serde"))
+        .any(|attr| {
+            let mut custom = false;
+            let _ = attr.parse_nested_meta(|meta| {
+                if meta.path.is_ident("transparent")
+                    || meta.path.is_ident("from")
+                    || meta.path.is_ident("try_from")
+                {
+                    custom = true;
+                }
+                // Consume unrelated attribute values so later options are visited.
+                if meta.input.peek(syn::Token![=]) {
+                    let _: syn::Expr = meta.value()?.parse()?;
+                } else if meta.input.peek(syn::token::Paren) {
+                    let content;
+                    syn::parenthesized!(content in meta.input);
+                    let _: proc_macro2::TokenStream = content.parse()?;
+                }
+                Ok(())
+            });
+            custom
+        })
 }

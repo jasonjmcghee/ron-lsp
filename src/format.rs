@@ -22,7 +22,9 @@ pub fn format_ron(content: &str) -> String {
     }
 
     // Parse the RON content (without annotation) for formatting
-    let ron_content = if content.trim_start().starts_with("/*") {
+    let ron_content = if content.trim_start().starts_with("/*")
+        && annotation_parser::parse_type_annotation(content).is_some()
+    {
         // Skip past the type annotation
         if let Some(end_idx) = content.find("*/") {
             &content[end_idx + 2..]
@@ -43,8 +45,21 @@ pub fn format_ron(content: &str) -> String {
     };
 
     // Format the main value
+    if tree.root_node().has_error() {
+        return content.to_string();
+    }
     if let Some(main_value) = ts_utils::find_main_value(&tree) {
+        // Extensions and comments belong to the document, not its main value.
+        // Keep their original order and spelling, including unknown extensions.
+        let preamble = ron_content[..main_value.start_byte()].trim();
+        if !preamble.is_empty() {
+            result.push_str(preamble);
+            result.push_str("\n\n");
+        }
         format_node(&main_value, ron_content, &mut result, 0, indent_str, false);
+        result.push_str(&ron_content[main_value.end_byte()..]);
+    } else {
+        return content.to_string();
     }
 
     result.trim_end().to_string()
@@ -335,6 +350,31 @@ fn format_tuple(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preserves_extensions_and_deserialization() {
+        #[derive(serde::Deserialize)]
+        struct Data {
+            name: Option<String>,
+        }
+        for prefix in ["", "/* @[crate::models::Data] */\n\n"] {
+            let input = format!("{prefix}#![enable(implicit_some)]\n#![enable(unwrap_newtypes)]\nData(name: \"aoeu\",)");
+            let output = format_ron(&input);
+            assert!(output.contains("#![enable(implicit_some)]"));
+            assert!(output.contains("#![enable(unwrap_newtypes)]"));
+            assert!(output.contains("    name: \"aoeu\","));
+            let data: Data = ron::from_str(&output).unwrap();
+            assert_eq!(data.name.as_deref(), Some("aoeu"));
+            assert_eq!(format_ron(&output), output);
+        }
+    }
+
+    #[test]
+    fn preserves_header_comments_and_invalid_input() {
+        let input = "/* header */\n#![enable(implicit_some)]\nData(name: \"x\")";
+        assert!(format_ron(input).starts_with("/* header */"));
+        assert_eq!(format_ron("Data(name:"), "Data(name:");
+    }
 
     #[test]
     fn test_simple_struct() {

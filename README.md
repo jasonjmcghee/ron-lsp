@@ -35,6 +35,14 @@ You can optionally pass a file or folder. (e.g. `ron-lsp check crates/sub-crate`
 
 It will use the nearest `Cargo.toml` starting from the resolved `.ron` file.
 
+You can also format files in place:
+
+```bash
+ron-lsp format
+```
+
+Same deal with the optional path. (e.g. `ron-lsp format crates/sub-crate` - it'll format all `.ron` files from that point.) No annotations needed, and it'll keep things like `#![enable(implicit_some)]`.
+
 ## Usage
 
 ### Type Annotation Format
@@ -59,6 +67,8 @@ The LSP will:
 4. Provide autocomplete and validation
 5. Support `Default` trait for optional field omission
 6. Provide code actions for inserting either required or missing fields, when applicable
+
+If you have a custom `Deserialize` impl (or use `#[serde(transparent)]`, `from`, or `try_from`), it'll skip the field-based checks for that type. So a newtype that reads from a string won't get flagged for not looking like a struct. It still checks RON syntax, but it can't check whatever your custom deserializer does.
 
 ### Example
 

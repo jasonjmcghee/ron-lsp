@@ -1659,6 +1659,12 @@ struct Cli {
 #[cfg(feature = "cli")]
 #[derive(Subcommand)]
 enum Commands {
+    /// Format a RON file or recursively format a directory in place
+    Format {
+        /// File or directory to format (defaults to current directory)
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
     /// Check RON files in a directory for errors
     Check {
         /// Directory to check (defaults to current directory)
@@ -1674,6 +1680,13 @@ async fn main() {
         let cli = Cli::parse();
 
         match cli.command {
+            Some(Commands::Format { path }) => {
+                if let Err(error) = run_format(&path) {
+                    eprintln!("{error:#}");
+                    std::process::exit(1);
+                }
+                return;
+            }
             Some(Commands::Check { directory }) => {
                 run_check(directory).await;
                 return;
@@ -1817,4 +1830,36 @@ async fn run_check(path: PathBuf) {
     } else {
         eprintln!("All files valid!");
     }
+}
+
+#[cfg(feature = "cli")]
+fn run_format(path: &Path) -> anyhow::Result<()> {
+    use anyhow::Context;
+    let metadata =
+        std::fs::metadata(path).with_context(|| format!("Cannot access {}", path.display()))?;
+    let files = if metadata.is_file() {
+        vec![path.to_path_buf()]
+    } else {
+        let mut files = Vec::new();
+        for entry in walkdir::WalkDir::new(path) {
+            let entry = entry?;
+            if entry.file_type().is_file()
+                && entry.path().extension().and_then(|s| s.to_str()) == Some("ron")
+            {
+                files.push(entry.into_path());
+            }
+        }
+        files.sort();
+        files
+    };
+    for file in files {
+        let content = std::fs::read_to_string(&file)
+            .with_context(|| format!("Cannot read {}", file.display()))?;
+        let formatted = format::format_ron(&content);
+        if formatted != content {
+            std::fs::write(&file, formatted)
+                .with_context(|| format!("Cannot write {}", file.display()))?;
+        }
+    }
+    Ok(())
 }
